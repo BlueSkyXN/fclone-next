@@ -40,6 +40,11 @@ jobs:
           check-latest: true
           cache: true
 
+      - name: Install NFS client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nfs-common
+
       - name: Install test binary
         run: |
           go install -tags noselfupdate .
