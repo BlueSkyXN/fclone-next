@@ -21,6 +21,22 @@ var (
 	childParentMap = map[string]string{} // tracks a one-to-many relationship between parent dirs and their direct children files - [child]parent
 )
 
+// fsCacheKeyer lets a backend provide a private cache identity without
+// changing its public Name/Root (and therefore ConfigString round-tripping).
+// An empty key means to use the standard ConfigString.
+type fsCacheKeyer interface {
+	FsCacheKey() string
+}
+
+func fsCacheKey(f fs.Fs) string {
+	if keyer, ok := f.(fsCacheKeyer); ok {
+		if key := keyer.FsCacheKey(); key != "" {
+			return key
+		}
+	}
+	return fs.ConfigString(f)
+}
+
 // Create the cache just once
 func createOnFirstUse() {
 	once.Do(func() {
@@ -114,7 +130,7 @@ func GetFn(ctx context.Context, fsString string, create func(ctx context.Context
 	}
 	// Check we stored the Fs at the canonical name
 	if created {
-		canonicalName := fs.ConfigString(f)
+		canonicalName := fsCacheKey(f)
 		if canonicalName != canonicalFsString {
 			if err == nil { // it's a dir
 				fs.Debugf(nil, "fs cache: renaming cache item %q to be canonical %q", canonicalFsString, canonicalName)
@@ -143,7 +159,7 @@ func GetFn(ctx context.Context, fsString string, create func(ctx context.Context
 // Pin f into the cache until Unpin is called
 func Pin(f fs.Fs) {
 	createOnFirstUse()
-	c.Pin(fs.ConfigString(f))
+	c.Pin(fsCacheKey(f))
 }
 
 // PinUntilFinalized pins f into the cache until x is garbage collected
@@ -160,7 +176,7 @@ func PinUntilFinalized(f fs.Fs, x any) {
 // Unpin f from the cache
 func Unpin(f fs.Fs) {
 	createOnFirstUse()
-	c.Unpin(fs.ConfigString(f))
+	c.Unpin(fsCacheKey(f))
 }
 
 // To avoid circular dependencies these are filled in by fs/rc/jobs/job.go
@@ -214,7 +230,7 @@ func GetArr(ctx context.Context, fsStrings []string) (f []fs.Fs, err error) {
 // PutErr puts an fs.Fs named fsString into the cache with err
 func PutErr(fsString string, f fs.Fs, err error) {
 	createOnFirstUse()
-	canonicalName := fs.ConfigString(f)
+	canonicalName := fsCacheKey(f)
 	c.PutErr(canonicalName, f, err)
 	addMapping(fsString, canonicalName)
 	if err == fs.ErrorIsFile {

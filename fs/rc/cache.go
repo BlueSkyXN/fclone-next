@@ -58,6 +58,11 @@ func GetFsNamedFileOK(ctx context.Context, in Params, fsName string) (newCtx con
 	if err != nil {
 		return ctx, f, err
 	}
+	if namer, ok := f.(interface{ FcloneFileName() string }); ok {
+		if actualName := namer.FcloneFileName(); actualName != "" {
+			fileName = actualName
+		}
+	}
 	ctx, fi := filter.AddConfig(ctx)
 	if !fi.InActive() {
 		return ctx, f, fmt.Errorf("can't limit to single files when using filters: %q", fileName)

@@ -29,22 +29,23 @@ var (
 func init() {
 	cmd.Root.AddCommand(commandDefinition)
 	cmdFlags := commandDefinition.Flags()
-	flags.BoolVarP(cmdFlags, &check, "check", "", false, "Check for new version", "")
+	flags.BoolVarP(cmdFlags, &check, "check", "", false, "Report that upstream rclone version checks are unavailable", "")
 	flags.BoolVarP(cmdFlags, &deps, "deps", "", false, "Show the Go dependencies", "")
 }
 
 var commandDefinition = &cobra.Command{
 	Use:   "version",
 	Short: `Show the version number.`,
-	Long: `Show the rclone version number, the go version, the build target
+	Long: `Show the fclone version, embedded rclone-core version, go version, build target
 OS and architecture, the runtime OS and kernel version and bitness,
 build tags and the type of executable (static or dynamic).
 
 For example:
 
 ` + "```console" + `
-$ rclone version
-rclone v1.55.0
+$ fclone version
+fclone v0.1.0
+- rclone v1.75.0-DEV
 - os/version: ubuntu 18.04 (64 bit)
 - os/kernel: 4.15.0-136-generic (x86_64)
 - os/type: linux
@@ -57,41 +58,23 @@ rclone v1.55.0
 Note: before rclone version 1.55 the os/type and os/arch lines were merged,
       and the "go/version" line was tagged as "go version".
 
-If you supply the --check flag, then it will do an online check to
-compare your version with the latest release and the latest beta.
+The --check flag is unavailable because official rclone downloads do not
+contain the fclone compatibility layer. Use this project's GitHub Releases.
 
-` + "```console" + `
-$ rclone version --check
-yours:  1.42.0.6
-latest: 1.42          (released 2018-06-16)
-beta:   1.42.0.5      (released 2018-06-17)
-` + "```" + `
-
-Or
-
-` + "```console" + `
-$ rclone version --check
-yours:  1.41
-latest: 1.42          (released 2018-06-16)
-  upgrade: https://downloads.rclone.org/v1.42
-beta:   1.42.0.5      (released 2018-06-17)
-  upgrade: https://beta.rclone.org/v1.42-005-g56e1e820
-` + "```" + `
-
-If you supply the --deps flag then rclone will print a list of all the
-packages it depends on and their versions along with some other
+If you supply the --deps flag then fclone will print its embedded Go
+dependencies and their versions along with some other
 information about the build.`,
 	Annotations: map[string]string{
 		"versionIntroduced": "v1.33",
 	},
 	RunE: func(command *cobra.Command, args []string) error {
-		ctx := context.Background()
 		cmd.CheckArgs(0, 0, command, args)
 		if deps {
 			return printDependencies()
 		}
 		if check {
-			CheckVersion(ctx)
+			fmt.Println("fclone: online checks against official rclone releases are disabled; use https://github.com/BlueSkyXN/fclone-next/releases")
+			cmd.ShowVersion()
 		} else {
 			cmd.ShowVersion()
 		}
@@ -107,7 +90,7 @@ func stripV(s string) string {
 	return s
 }
 
-// GetVersion gets the version available for download
+// GetVersion gets an upstream rclone version for the unregistered selfupdate package.
 func GetVersion(ctx context.Context, url string) (v *semver.Version, vs string, date time.Time, err error) {
 	resp, err := fshttp.NewClient(ctx).Get(url)
 	if err != nil {
@@ -132,7 +115,7 @@ func GetVersion(ctx context.Context, url string) (v *semver.Version, vs string, 
 	return v, vs, date, err
 }
 
-// CheckVersion checks the installed version against available downloads
+// CheckVersion supports the unregistered upstream selfupdate package.
 func CheckVersion(ctx context.Context) {
 	vCurrent, err := semver.NewVersion(stripV(fs.Version))
 	if err != nil {

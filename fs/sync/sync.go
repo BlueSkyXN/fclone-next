@@ -65,6 +65,9 @@ type syncCopyMove struct {
 	dstEmptyDirs           map[string]fs.DirEntry // potentially empty directories
 	srcEmptyDirsMu         sync.Mutex             // protect srcEmptyDirs
 	srcEmptyDirs           map[string]fs.DirEntry // potentially empty directories
+	fcloneTransferDirsMu   sync.Mutex             // protect fcloneTransferDirs
+	fcloneTransferDirs     map[string]struct{}    // destination directories required by queued transfers
+	fclonePrecreateEnabled bool                   // collect only for supported check-first destinations
 	srcMoveEmptyDirs       map[string]fs.DirEntry // potentially empty directories when moving files out of them
 	checkerWg              sync.WaitGroup         // wait for checkers
 	toBeChecked            *pipe                  // checkers channel
@@ -164,6 +167,11 @@ func newSyncCopyMove(ctx context.Context, fdst, fsrc fs.Fs, deleteMode fs.Delete
 		setDirModTimeAfter:     !ci.NoUpdateDirModTime && (!copyEmptySrcDirs || fsrc.Features().CanHaveEmptyDirectories && fdst.Features().DirModTimeUpdatesOnWrite),
 		modifiedDirs:           make(map[string]struct{}),
 		allowOverlap:           allowOverlap,
+	}
+	_, fclonePrecreateSupported := fdst.(fcloneDirectoryPrecreator)
+	s.fclonePrecreateEnabled = s.checkFirst && fclonePrecreateSupported
+	if s.fclonePrecreateEnabled {
+		s.fcloneTransferDirs = make(map[string]struct{})
 	}
 
 	s.logger, s.usingLogger = operations.GetLogger(ctx)
@@ -435,13 +443,13 @@ func (s *syncCopyMove) pairChecker(in *pipe, out *pipe, fraction int, wg *sync.W
 						} else {
 							// If successful zero out the dst as it is no longer there and copy the file
 							pair.Dst = nil
-							ok = out.Put(s.inCtx, pair)
+							ok = s.fclonePutTransfer(out, pair)
 							if !ok {
 								return
 							}
 						}
 					} else {
-						ok = out.Put(s.inCtx, pair)
+						ok = s.fclonePutTransfer(out, pair)
 						if !ok {
 							return
 						}
@@ -488,7 +496,7 @@ func (s *syncCopyMove) pairRenamer(in *pipe, out *pipe, fraction int, wg *sync.W
 		if !s.tryRename(src) {
 			// pass on if not renamed
 			fs.Debugf(src, "Need to transfer - No matching file found at Destination")
-			ok = out.Put(s.inCtx, pair)
+			ok = s.fclonePutTransfer(out, pair)
 			if !ok {
 				return
 			}
@@ -981,10 +989,17 @@ func (s *syncCopyMove) run() error {
 	// Stop background checking and transferring pipeline
 	s.stopCheckers()
 	if s.checkFirst {
+		// Renames can create the same Drive directories as precreation, so all
+		// rename decisions must finish before the directory phase starts.
+		s.stopRenamers()
+		if s.inCtx.Err() == nil {
+			s.fclonePrecreateDirectories(s.inCtx)
+		}
 		fs.Infof(s.fdst, "Checks finished, now starting transfers")
 		s.startTransfers()
+	} else {
+		s.stopRenamers()
 	}
-	s.stopRenamers()
 	s.stopTransfers()
 	s.stopDeleters()
 
@@ -1261,7 +1276,7 @@ func (s *syncCopyMove) SrcOnly(src fs.DirEntry) (recurse bool) {
 				// No need to check since doesn't exist
 				fs.Debugf(src, "Need to transfer - File not found at Destination")
 				s.markDirModifiedObject(x)
-				ok := s.toBeUploaded.Put(s.inCtx, fs.ObjectPair{Src: x, Dst: nil})
+				ok := s.fclonePutTransfer(s.toBeUploaded, fs.ObjectPair{Src: x, Dst: nil})
 				if !ok {
 					return
 				}
@@ -1273,8 +1288,9 @@ func (s *syncCopyMove) SrcOnly(src fs.DirEntry) (recurse bool) {
 		s.logger(s.ctx, operations.MissingOnDst, src, nil, fs.ErrorIsDir)
 
 		// Create the directory and make sure the Metadata/ModTime is correct
-		s.copyDirMetadata(s.ctx, s.fdst, nil, transform.Path(s.ctx, x.Remote(), true), x)
-		s.markDirModified(transform.Path(s.ctx, x.Remote(), true))
+		dstRemote := transform.Path(s.ctx, x.Remote(), true)
+		s.copyDirMetadata(s.ctx, s.fdst, nil, dstRemote, x)
+		s.markDirModified(dstRemote)
 		return true
 	default:
 		panic("Bad object in DirEntries")

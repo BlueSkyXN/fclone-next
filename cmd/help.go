@@ -22,17 +22,18 @@ import (
 	"golang.org/x/text/language"
 )
 
-// Root is the main rclone command
+// Root is the main fclone command
 var Root = &cobra.Command{
-	Use:   "rclone",
-	Short: "Show help for rclone commands, flags and backends.",
-	Long: `Rclone syncs files to and from cloud storage providers as well as
-mounting them, listing them in lots of different ways.
+	Use:   "fclone",
+	Short: "Show help for fclone commands, flags and backends.",
+	Long: `Fclone extends rclone and syncs files to and from cloud storage providers,
+as well as mounting them and listing them in lots of different ways.
 
-See the home page (https://rclone.org/) for installation, usage,
-documentation, changelog and configuration walkthroughs.`,
+See this project's README and releases at
+https://github.com/BlueSkyXN/fclone-next. Upstream rclone documentation at
+https://rclone.org/ remains applicable unless fclone documents a difference.`,
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
-		fs.Debugf("rclone", "Version %q finishing with parameters %q", fs.Version, os.Args)
+		fs.Debugf("fclone", "Version %q (rclone core %q) finishing with parameters %q", fs.FcloneVersion, fs.Version, os.Args)
 		atexit.Run()
 	},
 	ValidArgsFunction: validArgs,

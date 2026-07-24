@@ -1,0 +1,19 @@
+fclone
+======
+
+This project is based on the upstream rclone source code. Exact embedded-core
+coordinates are recorded in each versioned release note.
+
+rclone is Copyright (C) 2012-2026 The Rclone Authors and is distributed under
+the MIT License. The complete license text is included in COPYING. The upstream
+project is available at https://github.com/rclone/rclone.
+
+The compatibility behavior in this project was informed by the historical
+mawaya/rclone fclone work (https://github.com/mawaya/rclone) and donwa/gclone
+(https://github.com/donwa/gclone). The current compatibility implementation was
+rewritten against the current rclone codebase; this project is not a continuation or
+official release of either historical fork.
+
+The names rclone, fclone, gclone, Google Drive, and other project or product
+names may be trademarks of their respective owners. References identify
+compatibility targets and do not imply endorsement.

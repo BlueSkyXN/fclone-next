@@ -56,7 +56,6 @@ import (
 	_ "github.com/rclone/rclone/cmd/reveal"
 	_ "github.com/rclone/rclone/cmd/rmdir"
 	_ "github.com/rclone/rclone/cmd/rmdirs"
-	_ "github.com/rclone/rclone/cmd/selfupdate"
 	_ "github.com/rclone/rclone/cmd/serve"
 	_ "github.com/rclone/rclone/cmd/serve/dlna"
 	_ "github.com/rclone/rclone/cmd/serve/docker"
