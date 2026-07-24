@@ -68,7 +68,10 @@ func ShowVersion() {
 
 	arch := buildinfo.GetArch()
 
-	fmt.Printf("rclone %s\n", fs.Version)
+	fmt.Printf("fclone %s\n", fs.FcloneVersion)
+	// Keep the traditional "rclone v..." token in the output so scripts which
+	// parse `rclone version` continue to work while exposing the fclone layer.
+	fmt.Printf("- rclone %s\n", fs.Version)
 	fmt.Printf("- os/version: %s\n", osVersion)
 	fmt.Printf("- os/kernel: %s\n", osKernel)
 	fmt.Printf("- os/type: %s\n", runtime.GOOS)
@@ -93,6 +96,14 @@ func NewFsFile(remote string) (fs.Fs, string) {
 	switch err {
 	case fs.ErrorIsFile:
 		cache.Pin(f) // pin indefinitely since it was on the CLI
+		// Some compatibility backends can address an object by an opaque ID
+		// rather than by its file name. Let those backends report the actual
+		// name so all single-file commands behave consistently.
+		if namer, ok := f.(interface{ FcloneFileName() string }); ok {
+			if fileName := namer.FcloneFileName(); fileName != "" {
+				return f, fileName
+			}
+		}
 		return f, path.Base(fsPath)
 	case nil:
 		cache.Pin(f) // pin indefinitely since it was on the CLI

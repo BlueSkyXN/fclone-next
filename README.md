@@ -1,27 +1,128 @@
+# fclone
+
+fclone is a compatibility-focused derivative of
+[rclone](https://github.com/rclone/rclone), currently based on the rclone
+v1.75.0 development line at upstream commit `c99b2d11e`. It
+reimplements the useful behavior of the historical fclone/gclone family on a
+current rclone core while preserving normal rclone configuration and command
+semantics.
+
+[简体中文说明](README_zh-CN.md)
+
+This repository is an independent community project. It is not a continuation
+of the historical forks and is not an official rclone distribution.
+
+## fclone additions
+
+- A Google Drive Service Account pool using the historical
+  `service_account_file_path`, `service_account_min_sleep`,
+  `services_preload`, and `services_max` options, including quota-triggered
+  account rotation.
+- Direct Google Drive file, folder, and Shared Drive access with `{ID}` or a
+  supported Google Drive URL in the remote path.
+- Compatibility forms of the historical `lsdrives`, `add-drive`, and
+  `delete-drive` backend commands. Modern rclone `drives`, `copyid`, and
+  `moveid` commands remain available.
+- `--check-first` compatibility for Google Drive destinations that creates the
+  required non-empty destination directories after checking and before
+  transfers begin.
+- File throughput and file-count ETA information in transfer statistics.
+- Separate fclone and embedded rclone-core versions in `fclone version`.
+
+See [the compatibility reference](docs/fclone-compatibility.md) for exact
+syntax, upstream equivalents, migration guidance, and known differences.
+The [historical analysis](docs/historical-analysis.md) records the audited
+2020 fork baseline, feature commits, net diff, and defects deliberately not
+carried forward.
+Maintainers should also read the
+[upstream update guide](docs/upstream-maintenance.md).
+
+## Releases
+
+Install fclone only from this repository's
+[GitHub Releases](https://github.com/BlueSkyXN/fclone-next/releases). Release
+tags use the `fclone-vX.Y.Z` namespace. Each platform archive has an attached
+`.sha256` file and is included in `SHA256SUMS`; these checksums are currently
+unsigned and verify file integrity, not publisher identity.
+
+On systems with `sha256sum`, place the archive and `SHA256SUMS` in the same
+directory and verify the selected asset with:
+
+```console
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+fclone intentionally does not expose `selfupdate`. `version --check` preserves
+a successful read-only exit for scripts, but does not compare against official
+rclone downloads because they do not contain the compatibility layer.
+
+## Compatibility and migration
+
+fclone retains rclone's `rclone.conf` format, remote definitions, `RCLONE_*`
+environment variables, command syntax, and default config/cache locations.
+Existing rclone and historical fclone configurations can therefore be used
+directly. Keep a backup of the config, point fclone at it explicitly for the
+first run, and test with a read-only command before performing writes:
+
+```console
+fclone version
+fclone --config /path/to/rclone.conf lsd remote:
+fclone --config /path/to/rclone.conf copy --dry-run source: destination:
+```
+
+The upstream self-update command is disabled in fclone builds because it would
+replace fclone with an official rclone binary. Install fclone updates from this
+project's releases instead.
+
+## Building fclone
+
+Go 1.25 or newer is required. Go 1.26.5 is recommended and is the toolchain
+used for release builds.
+
+```console
+make fclone
+./fclone version
+```
+
+The target writes `fclone` (`fclone.exe` on Windows) and injects both the
+fclone and rclone-core versions. The upstream self-update command is not
+registered in any fclone build. Release builds set the fclone version explicitly:
+
+```console
+make fclone FCLONE_VERSION=v0.1.0
+```
+
+To include the `cmount` implementation on a platform with the required FUSE
+development libraries, use:
+
+```console
+make fclone FCLONE_TAGS="noselfupdate cmount"
+```
+
+The full upstream source is retained. The provider list below is an archived
+upstream capability reference; it is not an fclone download or installation
+guide. Install fclone only from this repository's
+[GitHub Releases](https://github.com/BlueSkyXN/fclone-next/releases) and verify
+the downloaded archive against the attached `SHA256SUMS`.
+
+---
+
 <!-- markdownlint-disable-next-line first-line-heading no-inline-html -->
 [<img src="https://rclone.org/img/logo_on_light__horizontal_color.svg" width="50%" alt="rclone logo">](https://rclone.org/#gh-light-mode-only)
 <!-- markdownlint-disable-next-line no-inline-html -->
 [<img src="https://rclone.org/img/logo_on_dark__horizontal_color.svg" width="50%" alt="rclone logo">](https://rclone.org/#gh-dark-mode-only)
 
-[Website](https://rclone.org) |
-[Documentation](https://rclone.org/docs/) |
-[Download](https://rclone.org/downloads/) |
-[Contributing](CONTRIBUTING.md) |
-[Changelog](https://rclone.org/changelog/) |
-[Installation](https://rclone.org/install/) |
-[Forum](https://forum.rclone.org/)
+[fclone Releases](https://github.com/BlueSkyXN/fclone-next/releases) |
+[fclone compatibility reference](docs/fclone-compatibility.md) |
+[Upstream rclone documentation](https://rclone.org/docs/) |
+[Contributing](CONTRIBUTING.md)
 
-[![Build Status](https://github.com/rclone/rclone/workflows/build/badge.svg)](https://github.com/rclone/rclone/actions?query=workflow%3Abuild)
-[![Go Report Card](https://goreportcard.com/badge/github.com/rclone/rclone)](https://goreportcard.com/report/github.com/rclone/rclone)
-[![GoDoc](https://godoc.org/github.com/rclone/rclone?status.svg)](https://godoc.org/github.com/rclone/rclone)
-[![Docker Pulls](https://img.shields.io/docker/pulls/rclone/rclone)](https://hub.docker.com/r/rclone/rclone)
-
-# Rclone
+## Archived upstream rclone capability reference
 
 Rclone *("rsync for cloud storage")* is a command-line program to sync files and
 directories to and from different cloud storage providers.
 
-## Storage providers
+### Storage providers
 
 - 1Fichier [:page_facing_up:](https://rclone.org/fichier/)
 - Akamai Netstorage [:page_facing_up:](https://rclone.org/netstorage/)
@@ -137,7 +238,7 @@ directories to and from different cloud storage providers.
 
 Please see [the full list of all storage providers and their features](https://rclone.org/overview/)
 
-### Virtual storage providers
+#### Virtual storage providers
 
 These backends adapt or modify other storage providers
 
@@ -151,7 +252,7 @@ These backends adapt or modify other storage providers
 - Hasher: hash files [:page_facing_up:](https://rclone.org/hasher/)
 - Union: join multiple remotes to work together [:page_facing_up:](https://rclone.org/union/)
 
-## Features
+### Features
 
 - MD5/SHA-1 hashes checked at all times for file integrity
 - Timestamps preserved on files
@@ -173,11 +274,11 @@ These backends adapt or modify other storage providers
 - Can [serve](https://rclone.org/commands/rclone_serve/) local or remote files
   over HTTP/WebDAV/FTP/SFTP/DLNA
 
-## Installation & documentation
+### Upstream documentation
 
-Please see the [rclone website](https://rclone.org/) for:
+The upstream rclone documentation remains useful for unchanged commands,
+backends, and configuration:
 
-- [Installation](https://rclone.org/install/)
 - [Documentation & configuration](https://rclone.org/docs/)
 - [Changelog](https://rclone.org/changelog/)
 - [FAQ](https://rclone.org/faq/)
@@ -185,11 +286,10 @@ Please see the [rclone website](https://rclone.org/) for:
 - [Forum](https://forum.rclone.org/)
 - ...and more
 
-## Downloads
+Do not use upstream rclone downloads as fclone updates; they do not contain the
+compatibility layer.
 
-- <https://rclone.org/downloads/>
-
-## License
+### License
 
 This is free software under the terms of the MIT license (check the
 [COPYING file](/COPYING) included in this package).

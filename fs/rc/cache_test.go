@@ -13,6 +13,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type fcloneNamedFileFs struct {
+	fs.Fs
+	fileName string
+}
+
+func (f *fcloneNamedFileFs) FcloneFileName() string { return f.fileName }
+
 func mockNewFs(t *testing.T) func() {
 	ctx := context.Background()
 	f, err := mockfs.NewFs(ctx, "/", "", nil)
@@ -25,6 +32,9 @@ func mockNewFs(t *testing.T) func() {
 	f, err = mockfs.NewFs(ctx, "mock", "dir/", nil)
 	require.NoError(t, err)
 	cache.PutErr("mock:dir/file.txt", f, fs.ErrorIsFile)
+	opaqueFs, err := mockfs.NewFs(ctx, "mock", "opaque/", nil)
+	require.NoError(t, err)
+	cache.PutErr("mock:{opaque-file-id}", &fcloneNamedFileFs{Fs: opaqueFs, fileName: "actual.txt"}, fs.ErrorIsFile)
 	return func() {
 		cache.Clear()
 	}
@@ -104,6 +114,16 @@ func TestGetFsNamedFileOK(t *testing.T) {
 	assert.False(t, fi.InActive())
 	assert.True(t, fi.IncludeRemote("file.txt"))
 	assert.False(t, fi.IncludeRemote("other.txt"))
+
+	in = Params{
+		"potato": "mock:{opaque-file-id}",
+	}
+	newCtx, f, err = GetFsNamedFileOK(ctx, in, "potato")
+	require.NoError(t, err)
+	assert.NotNil(t, f)
+	fi = filter.GetConfig(newCtx)
+	assert.True(t, fi.IncludeRemote("actual.txt"))
+	assert.False(t, fi.IncludeRemote("{opaque-file-id}"))
 }
 
 func TestGetConfigMap(t *testing.T) {

@@ -74,6 +74,39 @@ func TestPercentage(t *testing.T) {
 	assert.Equal(t, percent(-100, -100), "-")
 }
 
+func TestStatsStringFcloneFileProgress(t *testing.T) {
+	ctx, ci := fs.AddConfig(context.Background())
+	s := NewStats(ctx)
+	s.mu.Lock()
+	s.transfers = 2
+	s.transferQueue = 2
+	s.oldDuration = 2 * time.Second
+	s.mu.Unlock()
+
+	ci.StatsOneLine = true
+	oneLine := s.String()
+	assert.Contains(t, oneLine, "(xfr#2/4)")
+	assert.Contains(t, oneLine, "1.00 Files/s, ETA 2s")
+
+	ci.StatsOneLine = false
+	multiLine := s.String()
+	assert.Contains(t, multiLine, "Transferred:            2 / 4, 50%, 1.00 Files/s, ETA 2s")
+}
+
+func TestStatsStringFcloneCountsRemainAfterQueuesDrain(t *testing.T) {
+	ctx, ci := fs.AddConfig(context.Background())
+	ci.StatsOneLine = true
+	s := NewStats(ctx)
+	s.mu.Lock()
+	s.transfers = 4
+	s.checks = 3
+	s.oldDuration = 4 * time.Second
+	s.mu.Unlock()
+
+	got := s.String()
+	assert.Contains(t, got, "(xfr#4/4, chk#3/3)")
+}
+
 func TestStatsError(t *testing.T) {
 	ctx := context.Background()
 	s := NewStats(ctx)

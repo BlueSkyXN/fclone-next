@@ -36,6 +36,7 @@ const (
 // It is not used by developers directly.
 type resumableUpload struct {
 	f      *Fs
+	lease  *fcloneServiceLease
 	remote string
 	// URI is the resumable resource destination provided by the server after specifying "&uploadType=resumable".
 	URI string
@@ -51,6 +52,10 @@ type resumableUpload struct {
 
 // Upload the io.Reader in of size bytes with contentType and info
 func (f *Fs) Upload(ctx context.Context, in io.Reader, size int64, contentType, fileID, remote string, info *drive.File) (*drive.File, error) {
+	lease, err := f.fcloneNewServiceLease(ctx)
+	if err != nil {
+		return nil, err
+	}
 	params := url.Values{
 		"alt":        {"json"},
 		"uploadType": {"resumable"},
@@ -69,7 +74,6 @@ func (f *Fs) Upload(ctx context.Context, in io.Reader, size int64, contentType, 
 	}
 	urls += "?" + params.Encode()
 	var res *http.Response
-	var err error
 	err = f.pacer.Call(func() (bool, error) {
 		var body io.Reader
 		body, err = googleapi.WithoutDataWrapper.JSONReader(info)
@@ -89,12 +93,12 @@ func (f *Fs) Upload(ctx context.Context, in io.Reader, size int64, contentType, 
 		if size >= 0 {
 			req.Header.Set("X-Upload-Content-Length", fmt.Sprintf("%v", size))
 		}
-		res, err = f.client.Do(req)
+		res, err = lease.client.Do(req)
 		if err == nil {
 			defer googleapi.CloseBody(res)
 			err = googleapi.CheckResponse(res)
 		}
-		return f.shouldRetry(ctx, err)
+		return f.shouldRetryLease(ctx, err, lease)
 	})
 	if err != nil {
 		return nil, err
@@ -102,6 +106,7 @@ func (f *Fs) Upload(ctx context.Context, in io.Reader, size int64, contentType, 
 	loc := res.Header.Get("Location")
 	rx := &resumableUpload{
 		f:             f,
+		lease:         lease,
 		remote:        remote,
 		URI:           loc,
 		Media:         in,
@@ -132,7 +137,7 @@ func (rx *resumableUpload) makeRequest(ctx context.Context, start int64, body io
 func (rx *resumableUpload) transferChunk(ctx context.Context, start int64, chunk io.ReadSeeker, chunkSize int64) (int, error) {
 	_, _ = chunk.Seek(0, io.SeekStart)
 	req := rx.makeRequest(ctx, start, chunk, chunkSize)
-	res, err := rx.f.client.Do(req)
+	res, err := rx.lease.client.Do(req)
 	if err != nil {
 		return 599, err
 	}
@@ -199,7 +204,16 @@ func (rx *resumableUpload) Upload(ctx context.Context) (*drive.File, error) {
 		err = rx.f.pacer.Call(func() (bool, error) {
 			fs.Debugf(rx.remote, "Sending chunk %d length %d", start, reqSize)
 			StatusCode, err = rx.transferChunk(ctx, start, chunk, reqSize)
-			again, err := rx.f.shouldRetry(ctx, err)
+			accountBeforeRetry := rx.lease.currentKey
+			again, err := rx.f.shouldRetryLease(ctx, err, rx.lease)
+			if accountBeforeRetry != rx.lease.currentKey {
+				// A resumable session is authorized by the identity that
+				// created it. Abort this session after rotation so the high-
+				// level transfer retry creates a fresh session with the new
+				// account instead of mixing credentials between chunks.
+				again = false
+				err = fserrors.RetryError(fmt.Errorf("service account rotated during resumable upload; restart session: %w", err))
+			}
 			if StatusCode == statusResumeIncomplete || StatusCode == http.StatusCreated || StatusCode == http.StatusOK {
 				again = false
 				err = nil

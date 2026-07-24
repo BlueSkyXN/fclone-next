@@ -314,6 +314,7 @@ type transferStats struct {
 	totalBytes     int64
 	transferTime   float64
 	speed          float64
+	filesPerSecond float64
 }
 
 // calculateTransferStats calculates some additional transfer stats not
@@ -337,6 +338,9 @@ func (s *StatsInfo) calculateTransferStats() (ts transferStats) {
 	s.average.mu.Unlock()
 	dt := s._totalDuration()
 	ts.transferTime = dt.Seconds()
+	if ts.transferTime > 0 {
+		ts.filesPerSecond = float64(s.transfers) / ts.transferTime
+	}
 
 	return ts
 }
@@ -424,6 +428,8 @@ func (s *StatsInfo) String() string {
 		elapsedTime            = time.Since(s.startTime)
 		elapsedTimeSecondsOnly = elapsedTime.Truncate(time.Second/10) % time.Minute
 		displaySpeedString     string
+		fileSpeedString        = fmt.Sprintf("%.2f Files/s", ts.filesPerSecond)
+		fileSpeedOneLineString string
 	)
 
 	if s.ci.DataRateUnit == "bits" {
@@ -436,10 +442,10 @@ func (s *StatsInfo) String() string {
 		_, _ = fmt.Fprintf(buf, "\nTransferred:   	")
 	} else {
 		xfrchk := []string{}
-		if ts.totalTransfers > 0 && s.transferQueue > 0 {
+		if ts.totalTransfers > 0 {
 			xfrchk = append(xfrchk, fmt.Sprintf("xfr#%d/%d", s.transfers, ts.totalTransfers))
 		}
-		if ts.totalChecks > 0 && s.checkQueue > 0 {
+		if ts.totalChecks > 0 {
 			xfrchk = append(xfrchk, fmt.Sprintf("chk#%d/%d", s.checks, ts.totalChecks))
 		}
 		if len(xfrchk) > 0 {
@@ -449,9 +455,10 @@ func (s *StatsInfo) String() string {
 			t := time.Now()
 			dateString = t.Format(s.ci.StatsOneLineDateFormat) // Including the separator so people can customize it
 		}
+		fileSpeedOneLineString = fmt.Sprintf(", %s, ETA %s", fileSpeedString, etaString(s.transfers, ts.totalTransfers, ts.filesPerSecond))
 	}
 
-	_, _ = fmt.Fprintf(buf, "%s%13s / %s, %s, %s, ETA %s%s",
+	_, _ = fmt.Fprintf(buf, "%s%13s / %s, %s, %s, ETA %s%s%s",
 		dateString,
 		fs.SizeSuffix(s.bytes).ByteUnit(),
 		fs.SizeSuffix(ts.totalBytes).ByteUnit(),
@@ -459,6 +466,7 @@ func (s *StatsInfo) String() string {
 		displaySpeedString,
 		etaString(s.bytes, ts.totalBytes, ts.speed),
 		xfrchkString,
+		fileSpeedOneLineString,
 	)
 
 	if s.ci.ProgressTerminalTitle {
@@ -495,8 +503,9 @@ func (s *StatsInfo) String() string {
 			_, _ = fmt.Fprintf(buf, "Renamed:       %10d\n", s.renames)
 		}
 		if s.transfers != 0 || ts.totalTransfers != 0 {
-			_, _ = fmt.Fprintf(buf, "Transferred:   %10d / %d, %s\n",
-				s.transfers, ts.totalTransfers, percent(s.transfers, ts.totalTransfers))
+			_, _ = fmt.Fprintf(buf, "Transferred:   %10d / %d, %s, %s, ETA %s\n",
+				s.transfers, ts.totalTransfers, percent(s.transfers, ts.totalTransfers), fileSpeedString,
+				etaString(s.transfers, ts.totalTransfers, ts.filesPerSecond))
 		}
 		if s.serverSideCopies != 0 || s.serverSideCopyBytes != 0 {
 			_, _ = fmt.Fprintf(buf, "Server Side Copies:%6d @ %s\n",

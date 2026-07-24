@@ -222,14 +222,20 @@ var labelsFields = googleapi.Field(strings.Join([]string{
 // getLabels returns labels for the fileID passed in
 func (f *Fs) getLabels(ctx context.Context, fileID string) (labels []*drive.Label, err error) {
 	fs.Debugf(f, "Fetching labels for %q", fileID)
-	listLabels := f.svc.Files.ListLabels(fileID).
-		Fields(labelsFields).
-		Context(ctx)
+	lease, err := f.fcloneNewServiceLease(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pageToken := ""
 	for {
 		var info *drive.LabelList
 		err = f.pacer.Call(func() (bool, error) {
-			info, err = listLabels.Do()
-			return f.shouldRetry(ctx, err)
+			call := lease.service.Files.ListLabels(fileID).Fields(labelsFields)
+			if pageToken != "" {
+				call.PageToken(pageToken)
+			}
+			info, err = call.Context(ctx).Do()
+			return f.shouldRetryLeaseWithToken(ctx, err, lease, pageToken != "")
 		})
 		if err != nil {
 			return nil, err
@@ -238,7 +244,7 @@ func (f *Fs) getLabels(ctx context.Context, fileID string) (labels []*drive.Labe
 		if info.NextPageToken == "" {
 			break
 		}
-		listLabels.PageToken(info.NextPageToken)
+		pageToken = info.NextPageToken
 	}
 	for _, label := range labels {
 		cleanLabel(label)
@@ -258,10 +264,14 @@ func (f *Fs) setLabels(ctx context.Context, info *drive.File, labels []*drive.La
 			LabelId:            label.Id,
 		})
 	}
+	lease, err := f.fcloneNewServiceLease(ctx)
+	if err != nil {
+		return err
+	}
 	err = f.pacer.Call(func() (bool, error) {
-		_, err = f.svc.Files.ModifyLabels(info.Id, &req).
+		_, err = lease.service.Files.ModifyLabels(info.Id, &req).
 			Context(ctx).Do()
-		return f.shouldRetry(ctx, err)
+		return f.shouldRetryLease(ctx, err, lease)
 	})
 	if err != nil {
 		return fmt.Errorf("failed to set labels: %w", err)

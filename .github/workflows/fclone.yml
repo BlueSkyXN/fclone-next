@@ -1,0 +1,246 @@
+---
+name: fclone
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "fclone-v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fclone-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Go ${{ matrix.go }} test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        go:
+          - "1.25.x"
+          - "1.26.5"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+          check-latest: true
+          cache: true
+
+      - name: Install NFS client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nfs-common
+
+      - name: Install test binary
+        run: |
+          go install -tags noselfupdate .
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Test
+        env:
+          RCLONE_CONFIG: /notfound
+        run: make fclone-quicktest
+
+      - name: Vet changed packages
+        if: matrix.go == '1.26.5'
+        run: go vet ./backend/drive ./fs/cache ./fs/sync ./fs/accounting ./cmd/...
+
+      - name: Race-test compatibility packages
+        if: matrix.go == '1.26.5'
+        env:
+          RCLONE_CONFIG: /notfound
+        run: go test -race ./backend/drive ./fs/cache ./fs/sync ./fs/accounting
+
+      - name: Build and inspect fclone
+        if: matrix.go == '1.26.5'
+        run: |
+          make fclone FCLONE_VERSION=v0.1.0-ci
+          core_version="$(sed -n 's/^var VersionTag = "\([^"]*\)"/\1/p' fs/versiontag.go)-DEV"
+          ./fclone version
+          ./fclone version | grep -F 'fclone v0.1.0-ci'
+          ./fclone version | grep -F -- "- rclone ${core_version}"
+          ./fclone version --check >version-check.txt 2>&1
+          grep -F 'official rclone releases are disabled' version-check.txt
+
+      - name: Verify default build cannot self-update
+        if: matrix.go == '1.26.5'
+        run: |
+          go build -o fclone-default .
+          ./fclone-default version | grep -F 'fclone v0.1.0-dev'
+          if ./fclone-default selfupdate >selfupdate.txt 2>&1; then
+            echo 'selfupdate unexpectedly succeeded' >&2
+            exit 1
+          fi
+          grep -F 'unknown command "selfupdate"' selfupdate.txt
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            smoke: true
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.5"
+          check-latest: true
+          cache: true
+
+      - name: Set fclone version
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            if [[ ! "$GITHUB_REF_NAME" =~ ^fclone-v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]]; then
+              echo "invalid fclone release tag: $GITHUB_REF_NAME" >&2
+              exit 1
+            fi
+            version="${GITHUB_REF_NAME#fclone-}"
+          else
+            version="v0.1.0-dev.${GITHUB_SHA:0:8}"
+          fi
+          echo "FCLONE_BUILD_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Build, package, and inspect
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          package="fclone-${FCLONE_BUILD_VERSION#v}-${GOOS}-${GOARCH}"
+          stage="build/${package}"
+          mkdir -p "$stage" dist
+          binary="${stage}/fclone"
+          if [[ "$GOOS" == "windows" ]]; then binary="${binary}.exe"; fi
+          make fclone FCLONE_VERSION="$FCLONE_BUILD_VERSION" FCLONE_BINARY="$binary"
+          cp COPYING NOTICE README.md "$stage/"
+
+          if [[ "${{ matrix.smoke }}" == "true" ]]; then
+            core_version="$(sed -n 's/^var VersionTag = "\([^"]*\)"/\1/p' fs/versiontag.go)-DEV"
+            "$binary" version | grep -F "fclone ${FCLONE_BUILD_VERSION}"
+            "$binary" version | grep -F -- "- rclone ${core_version}"
+            if "$binary" selfupdate > release-selfupdate.txt 2>&1; then
+              echo 'release binary selfupdate unexpectedly succeeded' >&2
+              exit 1
+            fi
+            grep -F 'unknown command "selfupdate"' release-selfupdate.txt
+          fi
+
+          if [[ "$GOOS" == "windows" ]]; then
+            (cd build && zip -qr "../dist/${package}.zip" "$package")
+            archive="dist/${package}.zip"
+            unzip -Z1 "$archive" > archive-contents.txt
+          else
+            tar -C build -czf "dist/${package}.tar.gz" "$package"
+            archive="dist/${package}.tar.gz"
+            tar -tzf "$archive" > archive-contents.txt
+          fi
+
+          grep -Fx "${package}/COPYING" archive-contents.txt
+          grep -Fx "${package}/NOTICE" archive-contents.txt
+          grep -Fx "${package}/README.md" archive-contents.txt
+          if [[ "$GOOS" == "windows" ]]; then
+            grep -Fx "${package}/fclone.exe" archive-contents.txt
+          else
+            grep -Fx "${package}/fclone" archive-contents.txt
+          fi
+          archive_name="$(basename "$archive")"
+          (cd dist && sha256sum "$archive_name" > "${archive_name}.sha256")
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: fclone-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Create draft GitHub Release
+    if: startsWith(github.ref, 'refs/tags/fclone-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: fclone-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify checksums and create combined manifest
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^fclone-v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]]; then
+            echo "invalid fclone release tag: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          git fetch origin master
+          tag_commit="$(git rev-list -n1 "$GITHUB_REF")"
+          git merge-base --is-ancestor "$tag_commit" origin/master
+          for checksum in dist/*.sha256; do
+            (cd dist && sha256sum -c "$(basename "$checksum")")
+          done
+          (cd dist && sha256sum fclone-*.tar.gz fclone-*.zip > SHA256SUMS)
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#fclone-}"
+          notes_file="docs/release-notes-${version}.md"
+          notes_args=(--generate-notes)
+          if [[ -f "$notes_file" ]]; then
+            notes_args=(--notes-file "$notes_file")
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --draft \
+            --title "fclone ${version}" \
+            "${notes_args[@]}" \
+            dist/fclone-*.tar.gz \
+            dist/fclone-*.zip \
+            dist/fclone-*.sha256 \
+            dist/SHA256SUMS

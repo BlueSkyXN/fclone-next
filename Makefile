@@ -31,6 +31,13 @@ ifdef RELEASE_TAG
 endif
 GO_VERSION := $(shell go version)
 GO_OS := $(shell go env GOOS)
+# fclone release metadata is kept separate from the embedded rclone core.
+# Release automation should override FCLONE_VERSION with the release tag.
+FCLONE_VERSION ?= v0.1.0-dev
+RCLONE_BASE_VERSION ?= $(shell sed -n 's/^var VersionTag = "\([^"]*\)"/\1/p' fs/versiontag.go)-DEV
+FCLONE_BINARY ?= fclone$(shell go env GOEXE)
+FCLONE_TAGS ?= noselfupdate
+FCLONE_LDFLAGS = --ldflags "-s -X github.com/rclone/rclone/fs.Version=$(RCLONE_BASE_VERSION) -X github.com/rclone/rclone/fs.FcloneVersion=$(FCLONE_VERSION)"
 ifdef BETA_SUBDIR
 	BETA_SUBDIR := /$(BETA_SUBDIR)
 endif
@@ -45,7 +52,7 @@ LINTTAGS=--build-tags "$(GOTAGS)"
 endif
 LDFLAGS=--ldflags "-s -X github.com/rclone/rclone/fs.Version=$(TAG)"
 
-.PHONY: rclone test_all vars version fetch-gui fetch-gui-and-commit
+.PHONY: rclone fclone fclone-quicktest test_all vars version fetch-gui fetch-gui-and-commit
 
 rclone:
 ifeq ($(GO_OS),windows)
@@ -58,6 +65,15 @@ endif
 	mkdir -p `go env GOPATH`/bin/
 	cp -av rclone`go env GOEXE` `go env GOPATH`/bin/rclone`go env GOEXE`.new
 	mv -v `go env GOPATH`/bin/rclone`go env GOEXE`.new `go env GOPATH`/bin/rclone`go env GOEXE`
+
+# Build the compatibility binary without upstream self-update. This target is
+# intentionally small so the upstream rclone build remains easy to compare.
+fclone:
+	@mkdir -p "$(dir $(FCLONE_BINARY))"
+	go build -v -trimpath -tags "$(FCLONE_TAGS)" $(FCLONE_LDFLAGS) $(BUILD_ARGS) -o "$(FCLONE_BINARY)" .
+
+fclone-quicktest:
+	RCLONE_CONFIG="/notfound" go test -tags "$(FCLONE_TAGS)" ./...
 
 fetch-gui:
 	$(SHELL) ./bin/fetch-gui-dist.sh
@@ -74,6 +90,10 @@ vars:
 	@echo TAG="'$(TAG)'"
 	@echo VERSION="'$(VERSION)'"
 	@echo GO_VERSION="'$(GO_VERSION)'"
+	@echo FCLONE_VERSION="'$(FCLONE_VERSION)'"
+	@echo RCLONE_BASE_VERSION="'$(RCLONE_BASE_VERSION)'"
+	@echo FCLONE_BINARY="'$(FCLONE_BINARY)'"
+	@echo FCLONE_TAGS="'$(FCLONE_TAGS)'"
 	@echo BETA_URL="'$(BETA_URL)'"
 
 btest:
@@ -185,15 +205,15 @@ backenddocs: rclone bin/make_backend_docs.py
 rcdocs: rclone
 	bin/make_rc_docs.sh
 
-install: rclone
+install: fclone
 	install -d ${DESTDIR}/usr/bin
-	install ${GOPATH}/bin/rclone ${DESTDIR}/usr/bin
+	install -m 755 fclone ${DESTDIR}/usr/bin/fclone
 
 clean:
 	go clean ./...
 	find . -name \*~ | xargs -r rm -f
 	rm -rf build docs/public
-	rm -f rclone fs/operations/operations.test fs/sync/sync.test fs/test_all.log test.log
+	rm -f rclone fclone fclone.exe fs/operations/operations.test fs/sync/sync.test fs/test_all.log test.log
 
 website:
 	rm -rf docs/public
@@ -201,9 +221,11 @@ website:
 	@if grep -R "raw HTML omitted" docs/public ; then echo "ERROR: found unescaped HTML - fix the markdown source" ; fi
 
 upload_website:	website
+	@echo "Unsupported for fclone; publish only through the reviewed GitHub Actions workflow." >&2; exit 2
 	rclone -v sync docs/public www.rclone.org:
 
 upload_test_website:	website
+	@echo "Unsupported for fclone; publish only through the reviewed GitHub Actions workflow." >&2; exit 2
 	rclone -P sync docs/public test-rclone-org:
 
 validate_website: website
@@ -228,21 +250,25 @@ check_sign:
 	cd build && gpg --verify SHA256SUMS && gpg --decrypt SHA256SUMS | sha256sum -c
 
 upload:
+	@echo "Unsupported for fclone; publish only through the reviewed GitHub Actions workflow." >&2; exit 2
 	rclone -P copy build/ downloads.rclone.org:/$(TAG)
 	rclone lsf build --files-only --include '*.{zip,deb,rpm}' --include version.txt | xargs -i bash -c 'i={}; j="$$i"; [[ $$i =~ (.*)(-v[0-9\.]+-)(.*) ]] && j=$${BASH_REMATCH[1]}-current-$${BASH_REMATCH[3]}; rclone copyto -v "downloads.rclone.org:/$(TAG)/$$i" "downloads.rclone.org:/$$j"'
 
 upload_github:
+	@echo "Unsupported for fclone; publish only through the reviewed GitHub Actions workflow." >&2; exit 2
 	./bin/upload-github $(TAG)
 
 cross:	doc
 	go run bin/cross-compile.go -release current $(BUILD_FLAGS) $(BUILDTAGS) $(BUILD_ARGS) $(TAG)
 
 beta:
+	@echo "Unsupported for fclone; publish only through the reviewed GitHub Actions workflow." >&2; exit 2
 	go run bin/cross-compile.go $(BUILD_FLAGS) $(BUILDTAGS) $(BUILD_ARGS) $(TAG)
 	rclone -v copy build/ pub.rclone.org:/$(TAG)
 	@echo Beta release ready at https://pub.rclone.org/$(TAG)/
 
 privatebeta:
+	@echo "Unsupported for fclone; publish only through the reviewed GitHub Actions workflow." >&2; exit 2
 	go run bin/cross-compile.go $(BUILD_FLAGS) $(BUILDTAGS) $(BUILD_ARGS) -include '^(darwin|windows|linux)/(arm64|amd64)$$' $(TAG)
 	rclone -Pv copy build/ private-downloads:/beta/$(TAG)
 	@echo Private beta release ready at private-downloads:/beta/$(TAG)/
@@ -255,6 +281,7 @@ compile_all:
 	go run bin/cross-compile.go -compile-only $(BUILD_FLAGS) $(BUILDTAGS) $(BUILD_ARGS) $(TAG)
 
 ci_upload:
+	@echo "Unsupported for fclone; publish only through the reviewed GitHub Actions workflow." >&2; exit 2
 	sudo chown -R $$USER build
 	find build -type l -delete
 	gzip -r9v build
@@ -265,6 +292,7 @@ endif
 	@echo Beta release ready at $(BETA_URL)/testbuilds
 
 ci_beta:
+	@echo "Unsupported for fclone; publish only through the reviewed GitHub Actions workflow." >&2; exit 2
 	git log $(LAST_TAG).. > /tmp/git-log.txt
 	go run bin/cross-compile.go -release beta-latest -git-log /tmp/git-log.txt $(BUILD_FLAGS) $(BUILDTAGS) $(BUILD_ARGS) $(TAG)
 	rclone --no-check-dest --config bin/ci.rclone.conf -v copy --exclude '*beta-latest*' build/ $(BETA_UPLOAD)
@@ -275,6 +303,7 @@ endif
 
 # Fetch the binary builds from GitHub actions
 fetch_binaries:
+	@echo "Unsupported for fclone; use GitHub Actions artifacts without syncing rclone release storage." >&2; exit 2
 	rclone -P sync --exclude "/testbuilds/**" --delete-excluded $(BETA_UPLOAD) build/
 
 serve:	website
@@ -289,10 +318,12 @@ tag:	retag doc
 	@echo "And finally run make retag before make cross, etc."
 
 retag:
+	@echo "Unsupported for fclone; use signed fclone-v* tags after reviewed CI passes." >&2; exit 2
 	@echo "Version is $(VERSION)"
 	git tag -f -s -m "Version $(VERSION)" $(VERSION)
 
 startdev:
+	@echo "Unsupported for fclone; do not mutate the embedded rclone version with this target." >&2; exit 2
 	@echo "Version is $(VERSION)"
 	@echo "Next version is $(NEXT_VERSION)"
 	echo -e "package fs\n\n// VersionTag of rclone\nvar VersionTag = \"$(NEXT_VERSION)\"\n" | gofmt > fs/versiontag.go
@@ -301,6 +332,7 @@ startdev:
 	git commit -m "Start $(NEXT_VERSION)-DEV development" fs/versiontag.go VERSION docs/layouts/partials/version.html
 
 startstable:
+	@echo "Unsupported for fclone; do not mutate the embedded rclone version with this target." >&2; exit 2
 	@echo "Version is $(VERSION)"
 	@echo "Next stable version is $(NEXT_PATCH_VERSION)"
 	echo -e "package fs\n\n// VersionTag of rclone\nvar VersionTag = \"$(NEXT_PATCH_VERSION)\"\n" | gofmt > fs/versiontag.go
@@ -336,6 +368,7 @@ docker-plugin-create:
 	docker plugin create ${PLUGIN_IMAGE} ${PLUGIN_BUILD_DIR}
 
 docker-plugin-push:
+	@echo "Unsupported for fclone; no fclone Docker plugin release channel is configured." >&2; exit 2
 	docker plugin push ${PLUGIN_IMAGE}
 	docker plugin rm ${PLUGIN_IMAGE}
 

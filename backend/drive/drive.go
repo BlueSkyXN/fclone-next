@@ -224,7 +224,7 @@ func init() {
 		Name:        "drive",
 		Description: "Google Drive",
 		NewFs:       NewFs,
-		CommandHelp: commandHelp,
+		CommandHelp: append(commandHelp, fcloneSharedDriveCommandHelp...),
 		Config: func(ctx context.Context, name string, m configmap.Mapper, configIn fs.ConfigIn) (*fs.ConfigOut, error) {
 			// Parse config into Options struct
 			opt := new(Options)
@@ -349,6 +349,26 @@ a non root folder as its starting point.
 		}, {
 			Name: "service_account_file",
 			Help: "Service Account Credentials JSON file path.\n\nLeave blank normally.\nNeeded only if you want use SA instead of interactive login." + env.ShellExpandHelp,
+		}, {
+			Name:      "service_account_file_path",
+			Help:      "Directory containing Service Account credential JSON files. This legacy fclone option enables account pooling and automatic rotation.",
+			Advanced:  true,
+			Sensitive: true,
+		}, {
+			Name:     "service_account_min_sleep",
+			Default:  fcloneDefaultServiceAccountMinSleep,
+			Help:     "Minimum interval between automatic Service Account rotations.",
+			Advanced: true,
+		}, {
+			Name:     "services_preload",
+			Default:  fcloneDefaultServicesPreload,
+			Help:     "Number of Service Account clients to preload for concurrent Drive operations.",
+			Advanced: true,
+		}, {
+			Name:     "services_max",
+			Default:  fcloneDefaultServicesMax,
+			Help:     "Maximum number of Service Account clients retained in memory.",
+			Advanced: true,
 		}, {
 			Name:      "service_account_credentials",
 			Help:      "Service Account Credentials JSON blob.\n\nLeave blank normally.\nNeeded only if you want use SA instead of interactive login.",
@@ -808,6 +828,10 @@ type Options struct {
 	Scope                     string               `config:"scope"`
 	RootFolderID              string               `config:"root_folder_id"`
 	ServiceAccountFile        string               `config:"service_account_file"`
+	ServiceAccountFilePath    string               `config:"service_account_file_path"`
+	ServiceAccountMinSleep    fs.Duration          `config:"service_account_min_sleep"`
+	ServicesPreload           int                  `config:"services_preload"`
+	ServicesMax               int                  `config:"services_max"`
 	ServiceAccountCredentials string               `config:"service_account_credentials"`
 	TeamDriveID               string               `config:"team_drive"`
 	AuthOwnerOnly             bool                 `config:"auth_owner_only"`
@@ -875,6 +899,11 @@ type Fs struct {
 	dirResourceKeys  *sync.Map                    // map directory ID to resource key
 	permissionsMu    *sync.Mutex                  // protect the below
 	permissions      map[string]*drive.Permission // map permission IDs to Permissions
+	fcloneAccounts   *fcloneServiceAccountPool    // legacy fclone Service Account pool
+	fcloneFile       fs.Object                    // object addressed directly by Drive ID
+	fcloneFileName   string                       // actual name of fcloneFile
+	fcloneConfigRoot string                       // original {ID}/path used for canonical cache identity
+	fcloneCacheKey   string                       // private cache parent key for a direct file
 }
 
 type baseObject struct {
@@ -924,7 +953,16 @@ func (f *Fs) Name() string {
 
 // Root of the remote (as passed into NewFs)
 func (f *Fs) Root() string {
+	if f.fcloneConfigRoot != "" {
+		return f.fcloneConfigRoot
+	}
 	return f.root
+}
+
+// FsCacheKey returns a private file-parent identity for fs/cache. Direct files
+// need this so cache can replay ErrorIsFile without exposing a synthetic Root.
+func (f *Fs) FsCacheKey() string {
+	return f.fcloneCacheKey
 }
 
 // String converts this Fs to a string
@@ -939,6 +977,26 @@ func (f *Fs) Features() *fs.Features {
 
 // shouldRetry determines whether a given err rates being retried
 func (f *Fs) shouldRetry(ctx context.Context, err error) (bool, error) {
+	return f.shouldRetryWithRotation(ctx, err, f.fcloneAccounts.rotate)
+}
+
+func (f *Fs) shouldRetryLease(ctx context.Context, err error, lease *fcloneServiceLease) (bool, error) {
+	return f.shouldRetryWithRotation(ctx, err, lease.rotate)
+}
+
+// shouldRetryLeaseWithToken keeps an account stable once a page token has
+// been issued. Google doesn't guarantee that Drive page tokens can be reused
+// by another identity, so quota rotation is safe only before the first page.
+func (f *Fs) shouldRetryLeaseWithToken(ctx context.Context, err error, lease *fcloneServiceLease, hasPageToken bool) (bool, error) {
+	if !hasPageToken {
+		return f.shouldRetryLease(ctx, err, lease)
+	}
+	return f.shouldRetryWithRotation(ctx, err, func(context.Context, string) (bool, error) {
+		return false, nil
+	})
+}
+
+func (f *Fs) shouldRetryWithRotation(ctx context.Context, err error, rotate func(context.Context, string) (bool, error)) (bool, error) {
 	if fserrors.ContextError(ctx, &err) {
 		return false, err
 	}
@@ -956,10 +1014,18 @@ func (f *Fs) shouldRetry(ctx context.Context, err error) (bool, error) {
 		}
 		if len(gerr.Errors) > 0 {
 			reason := gerr.Errors[0].Reason
-			if reason == "rateLimitExceeded" || reason == "userRateLimitExceeded" {
-				if f.opt.StopOnUploadLimit && gerr.Errors[0].Message == "User rate limit exceeded." {
+			message := gerr.Errors[0].Message
+			if reason == "rateLimitExceeded" || reason == "userRateLimitExceeded" || reason == "dailyLimitExceededUnreg" || strings.HasPrefix(message, "Daily Limit") {
+				if f.opt.StopOnUploadLimit && message == "User rate limit exceeded." {
 					fs.Errorf(f, "Received upload limit error: %v", err)
 					return false, fserrors.FatalError(err)
+				}
+				rotated, rotateErr := rotate(ctx, reason)
+				if rotateErr != nil {
+					fs.Errorf(f, "fclone: Service Account rotation failed: %v", rotateErr)
+				}
+				if rotated {
+					return true, err
 				}
 				return true, err
 			} else if f.opt.StopOnDownloadLimit && reason == "downloadQuotaExceeded" {
@@ -994,11 +1060,18 @@ func containsString(slice []string, s string) bool {
 
 // getFile returns drive.File for the ID passed and fields passed in
 func (f *Fs) getFile(ctx context.Context, ID string, fields googleapi.Field) (info *drive.File, err error) {
+	return f.getFileWithResourceKey(ctx, ID, fields, "")
+}
+
+func (f *Fs) getFileWithResourceKey(ctx context.Context, ID string, fields googleapi.Field, resourceKey string) (info *drive.File, err error) {
 	err = f.pacer.Call(func() (bool, error) {
-		info, err = f.svc.Files.Get(ID).
+		call := f.svc.Files.Get(ID).
 			Fields(fields).
-			SupportsAllDrives(true).
-			Context(ctx).Do()
+			SupportsAllDrives(true)
+		if resourceKey != "" {
+			call.Header().Set("X-Goog-Drive-Resource-Keys", ID+"/"+resourceKey)
+		}
+		info, err = call.Context(ctx).Do()
 		return f.shouldRetry(ctx, err)
 	})
 	return info, err
@@ -1109,40 +1182,45 @@ func (f *Fs) list(ctx context.Context, dirIDs []string, title string, directorie
 		queryByTime("<=", fi.ModTimeTo)
 	}
 
-	list := f.svc.Files.List()
 	queryString := strings.Join(query, " and ")
-	if queryString != "" {
-		list.Q(queryString)
-		// fs.Debugf(f, "list query: %q", queryString)
-	}
 	f.lastQuery = queryString // for unit tests
-
-	if f.opt.ListChunk > 0 {
-		list.PageSize(f.opt.ListChunk)
-	}
-	list.SupportsAllDrives(true)
-	list.IncludeItemsFromAllDrives(true)
-	if f.isTeamDrive && !f.opt.SharedWithMe {
-		list.DriveId(f.opt.TeamDriveID)
-		list.Corpora("drive")
-	}
-	// If using appDataFolder then need to add Spaces
-	if f.rootFolderID == "appDataFolder" {
-		list.Spaces("appDataFolder")
-	}
-	// Add resource Keys if necessary
-	if resourceKeysHeader != "" {
-		list.Header().Add("X-Goog-Drive-Resource-Keys", resourceKeysHeader)
-	}
-
 	fields := fmt.Sprintf("files(%s),nextPageToken,incompleteSearch", f.getFileFields(ctx))
+	pageToken := ""
+	lease, err := f.fcloneNewServiceLease(ctx)
+	if err != nil {
+		return false, err
+	}
 
 OUTER:
 	for {
 		var files *drive.FileList
 		err = f.pacer.Call(func() (bool, error) {
+			// Construct the call for every retry so a pooled Service Account
+			// can actually change after a quota response.
+			list := lease.service.Files.List()
+			if queryString != "" {
+				list.Q(queryString)
+			}
+			if f.opt.ListChunk > 0 {
+				list.PageSize(f.opt.ListChunk)
+			}
+			list.SupportsAllDrives(true)
+			list.IncludeItemsFromAllDrives(true)
+			if f.isTeamDrive && !f.opt.SharedWithMe {
+				list.DriveId(f.opt.TeamDriveID)
+				list.Corpora("drive")
+			}
+			if f.rootFolderID == "appDataFolder" {
+				list.Spaces("appDataFolder")
+			}
+			if resourceKeysHeader != "" {
+				list.Header().Add("X-Goog-Drive-Resource-Keys", resourceKeysHeader)
+			}
+			if pageToken != "" {
+				list.PageToken(pageToken)
+			}
 			files, err = list.Fields(googleapi.Field(fields)).Context(ctx).Do()
-			return f.shouldRetry(ctx, err)
+			return f.shouldRetryLeaseWithToken(ctx, err, lease, pageToken != "")
 		})
 		if err != nil {
 			return false, fmt.Errorf("couldn't list directory: %w", err)
@@ -1195,7 +1273,7 @@ OUTER:
 		if files.NextPageToken == "" {
 			break
 		}
-		list.PageToken(files.NextPageToken)
+		pageToken = files.NextPageToken
 	}
 	return
 }
@@ -1376,6 +1454,10 @@ func newFs(ctx context.Context, name, path string, m configmap.Mapper) (*Fs, err
 	if err != nil {
 		return nil, err
 	}
+	fcloneAccounts, err := prepareFcloneServiceAccountPool(opt)
+	if err != nil {
+		return nil, err
+	}
 	err = checkUploadCutoff(opt.UploadCutoff)
 	if err != nil {
 		return nil, fmt.Errorf("drive: upload cutoff: %w", err)
@@ -1385,9 +1467,20 @@ func newFs(ctx context.Context, name, path string, m configmap.Mapper) (*Fs, err
 		return nil, fmt.Errorf("drive: chunk size: %w", err)
 	}
 
-	oAuthClient, err := createOAuthClient(ctx, opt, name, m)
+	authCtx := ctx
+	if fcloneAccounts != nil {
+		// A pooled client's token source is retained for the lifetime of the
+		// cached Fs, while individual operations still pass their own contexts
+		// to Drive requests.
+		authCtx = context.WithoutCancel(ctx)
+	}
+	oAuthClient, err := createOAuthClient(authCtx, opt, name, m)
 	if err != nil {
 		return nil, fmt.Errorf("drive: failed when making oauth client: %w", err)
+	}
+	oAuthClient, err = fcloneAccounts.attach(authCtx, oAuthClient, opt, name, m)
+	if err != nil {
+		return nil, fmt.Errorf("drive: initialize fclone Service Account pool: %w", err)
 	}
 
 	root, err := parseDrivePath(path)
@@ -1409,6 +1502,7 @@ func newFs(ctx context.Context, name, path string, m configmap.Mapper) (*Fs, err
 		dirResourceKeys: new(sync.Map),
 		permissionsMu:   new(sync.Mutex),
 		permissions:     make(map[string]*drive.Permission),
+		fcloneAccounts:  fcloneAccounts,
 	}
 	f.isTeamDrive = opt.TeamDriveID != ""
 	f.features = (&fs.Features{
@@ -1447,13 +1541,58 @@ func newFs(ctx context.Context, name, path string, m configmap.Mapper) (*Fs, err
 
 // NewFs constructs an Fs from the path, container:path
 func NewFs(ctx context.Context, name, path string, m configmap.Mapper) (fs.Fs, error) {
+	fcloneRoot, hasFcloneRoot, err := parseFcloneRootSpec(path)
+	if err != nil {
+		return nil, err
+	}
+	if hasFcloneRoot {
+		path = fcloneRoot.path
+	}
+
 	f, err := newFs(ctx, name, path, m)
 	if err != nil {
 		return nil, err
 	}
+	effectiveResourceKey := ""
+	if hasFcloneRoot {
+		effectiveResourceKey = fcloneRoot.resourceKey
+		if effectiveResourceKey == "" {
+			effectiveResourceKey = f.opt.ResourceKey
+		}
+		// fs/cache canonicalizes an Fs from Name()+Root(). Preserve the opaque
+		// ID and resource key or direct roots would alias after parsing.
+		canonicalRoot := fcloneRoot
+		canonicalRoot.resourceKey = effectiveResourceKey
+		f.fcloneConfigRoot = fcloneCanonicalRoot(canonicalRoot)
+	}
+
+	var fcloneRootInfo *drive.File
+	if hasFcloneRoot {
+		fcloneRootInfo, err = f.getFileWithResourceKey(ctx, fcloneRoot.id, f.getFileFields(ctx)+",driveId", effectiveResourceKey)
+		if err != nil {
+			return nil, fmt.Errorf("fclone: couldn't resolve Drive ID %q: %w", fcloneRoot.id, err)
+		}
+		if fcloneRootInfo.DriveId != "" {
+			f.opt.TeamDriveID = fcloneRootInfo.DriveId
+			f.isTeamDrive = true
+		}
+		if fcloneRootInfo.ResourceKey == "" {
+			fcloneRootInfo.ResourceKey = effectiveResourceKey
+		}
+	}
 
 	// Set the root folder ID
-	if f.opt.RootFolderID != "" {
+	if fcloneRootInfo != nil && fcloneRootInfo.MimeType == driveFolderType {
+		// A direct-ID folder is the cache root, regardless of root_folder_id.
+		f.rootFolderID = fcloneRoot.id
+	} else if fcloneRootInfo != nil {
+		// A direct-ID file does not need a traversable parent. Use the Shared
+		// Drive root when known and otherwise the canonical My Drive alias.
+		f.rootFolderID = fcloneRootInfo.DriveId
+		if f.rootFolderID == "" {
+			f.rootFolderID = "root"
+		}
+	} else if f.opt.RootFolderID != "" {
 		// use root_folder ID if set
 		f.rootFolderID = f.opt.RootFolderID
 	} else if f.isTeamDrive {
@@ -1479,8 +1618,12 @@ func NewFs(ctx context.Context, name, path string, m configmap.Mapper) (fs.Fs, e
 	f.dirCache = dircache.New(f.root, f.rootFolderID, f)
 
 	// If resource key is set then cache it for the root folder id
-	if f.opt.ResourceKey != "" {
-		f.dirResourceKeys.Store(f.rootFolderID, f.opt.ResourceKey)
+	rootResourceKey := f.opt.ResourceKey
+	if hasFcloneRoot {
+		rootResourceKey = effectiveResourceKey
+	}
+	if rootResourceKey != "" {
+		f.dirResourceKeys.Store(f.rootFolderID, rootResourceKey)
 	}
 
 	// Parse extensions
@@ -1498,6 +1641,25 @@ func NewFs(ctx context.Context, name, path string, m configmap.Mapper) (fs.Fs, e
 	_, f.importMimeTypes, err = parseExtensions(f.opt.ImportExtensions)
 	if err != nil {
 		return nil, err
+	}
+
+	if fcloneRootInfo != nil && fcloneRootInfo.MimeType != driveFolderType {
+		if fcloneRoot.path != "" {
+			return nil, fmt.Errorf("fclone: Drive ID %q is a file, so it can't have subpath %q", fcloneRoot.id, fcloneRoot.path)
+		}
+		remote := f.opt.Enc.ToStandardName(fcloneRootInfo.Name)
+		obj, err := f.newObjectWithInfo(ctx, remote, fcloneRootInfo)
+		if err != nil {
+			return nil, fmt.Errorf("fclone: couldn't open Drive file ID %q: %w", fcloneRoot.id, err)
+		}
+		if obj == nil {
+			return nil, fmt.Errorf("fclone: Drive file ID %q has an unsupported type %q", fcloneRoot.id, fcloneRootInfo.MimeType)
+		}
+		f.root = ""
+		f.fcloneFile = obj
+		f.fcloneFileName = obj.Remote()
+		f.fcloneCacheKey = f.name + ":\x00fclone-drive-file:" + f.fcloneConfigRoot
+		return f, fs.ErrorIsFile
 	}
 
 	// Find the current root
@@ -1729,6 +1891,12 @@ func (f *Fs) newObjectWithExportInfo(
 // NewObject finds the Object at remote.  If it can't be found
 // it returns the error fs.ErrorObjectNotFound.
 func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
+	if f.fcloneFile != nil {
+		if strings.Trim(remote, "/") == strings.Trim(f.fcloneFileName, "/") {
+			return f.fcloneFile, nil
+		}
+		return nil, fs.ErrorObjectNotFound
+	}
 	if strings.HasSuffix(remote, "/") {
 		return nil, fs.ErrorIsDir
 	}
@@ -1789,12 +1957,16 @@ func (f *Fs) createDir(ctx context.Context, pathID, leaf string, metadata fs.Met
 			return nil, fmt.Errorf("create dir: failed to update metadata: %w", err)
 		}
 	}
+	lease, err := f.fcloneNewServiceLease(ctx)
+	if err != nil {
+		return nil, err
+	}
 	err = f.pacer.Call(func() (bool, error) {
-		info, err = f.svc.Files.Create(createInfo).
+		info, err = lease.service.Files.Create(createInfo).
 			Fields(f.getFileFields(ctx)).
 			SupportsAllDrives(true).
 			Context(ctx).Do()
-		return f.shouldRetry(ctx, err)
+		return f.shouldRetryLease(ctx, err, lease)
 	})
 	if err != nil {
 		return nil, err
@@ -2021,6 +2193,12 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 // callback returns an error then the listing will stop
 // immediately.
 func (f *Fs) ListP(ctx context.Context, dir string, callback fs.ListRCallback) error {
+	if f.fcloneFile != nil {
+		if dir != "" {
+			return fs.ErrorDirNotFound
+		}
+		return callback(fs.DirEntries{f.fcloneFile})
+	}
 	list := list.NewHelper(callback)
 	entriesAdded := 0
 	directoryID, err := f.dirCache.FindDir(ctx, dir, false)
@@ -2242,6 +2420,12 @@ func (f *Fs) listRRunner(ctx context.Context, wg *sync.WaitGroup, in chan listRE
 // Don't implement this unless you have a more efficient way
 // of listing recursively that doing a directory traversal.
 func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (err error) {
+	if f.fcloneFile != nil {
+		if dir != "" {
+			return fs.ErrorDirNotFound
+		}
+		return callback(fs.DirEntries{f.fcloneFile})
+	}
 	directoryID, err := f.dirCache.FindDir(ctx, dir, false)
 	if err != nil {
 		return err
@@ -2585,16 +2769,20 @@ func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, 
 
 	var info *drive.File
 	if size >= 0 && size < int64(f.opt.UploadCutoff) {
+		lease, leaseErr := f.fcloneNewServiceLease(ctx)
+		if leaseErr != nil {
+			return nil, leaseErr
+		}
 		// Make the API request to upload metadata and file data.
 		// Don't retry, return a retry error instead
 		err = f.pacer.CallNoRetry(func() (bool, error) {
-			info, err = f.svc.Files.Create(createInfo).
+			info, err = lease.service.Files.Create(createInfo).
 				Media(in, googleapi.ContentType(srcMimeType), googleapi.ChunkSize(0)).
 				Fields(partialFields).
 				SupportsAllDrives(true).
 				KeepRevisionForever(f.opt.KeepRevisionForever).
 				Context(ctx).Do()
-			return f.shouldRetry(ctx, err)
+			return f.shouldRetryLease(ctx, err, lease)
 		})
 		if err != nil {
 			return nil, err
@@ -2888,14 +3076,18 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	}
 
 	var info *drive.File
+	lease, err := f.fcloneNewServiceLease(ctx)
+	if err != nil {
+		return nil, err
+	}
 	err = f.pacer.Call(func() (bool, error) {
-		copy := f.svc.Files.Copy(id, createInfo).
+		copy := lease.service.Files.Copy(id, createInfo).
 			Fields(f.getFileFields(ctx)).
 			SupportsAllDrives(true).
 			KeepRevisionForever(f.opt.KeepRevisionForever)
 		srcObj.addResourceKey(copy.Header())
 		info, err = copy.Context(ctx).Do()
-		return f.shouldRetry(ctx, err)
+		return f.shouldRetryLease(ctx, err, lease)
 	})
 	if err != nil {
 		return nil, err
@@ -3228,9 +3420,16 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 // Close the returned channel to stop being notified.
 func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryType), pollIntervalChan <-chan time.Duration) {
 	go func() {
-		// get the StartPageToken early so all changes from now on get processed
-		startPageToken, err := f.changeNotifyStartPageToken(ctx)
+		lease, err := f.fcloneNewServiceLease(ctx)
 		if err != nil {
+			fs.Infof(f, "Failed to initialize Service Account lease for change notifications: %s", err)
+		}
+		// get the StartPageToken early so all changes from now on get processed
+		startPageToken := ""
+		if lease != nil {
+			startPageToken, err = f.changeNotifyStartPageToken(ctx, lease)
+		}
+		if err != nil || lease == nil {
 			fs.Infof(f, "Failed to get StartPageToken: %s", err)
 		}
 		var ticker *time.Ticker
@@ -3254,14 +3453,19 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 				}
 			case <-tickerC:
 				if startPageToken == "" {
-					startPageToken, err = f.changeNotifyStartPageToken(ctx)
+					if lease == nil {
+						lease, err = f.fcloneNewServiceLease(ctx)
+					}
+					if lease != nil {
+						startPageToken, err = f.changeNotifyStartPageToken(ctx, lease)
+					}
 					if err != nil {
 						fs.Infof(f, "Failed to get StartPageToken: %s", err)
 						continue
 					}
 				}
 				fs.Debugf(f, "Checking for changes on remote")
-				startPageToken, err = f.changeNotifyRunner(ctx, notifyFunc, startPageToken)
+				startPageToken, err = f.changeNotifyRunner(ctx, notifyFunc, startPageToken, lease)
 				if err != nil {
 					fs.Infof(f, "Change notify listener failure: %s", err)
 				}
@@ -3270,15 +3474,15 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 	}()
 }
 
-func (f *Fs) changeNotifyStartPageToken(ctx context.Context) (pageToken string, err error) {
+func (f *Fs) changeNotifyStartPageToken(ctx context.Context, lease *fcloneServiceLease) (pageToken string, err error) {
 	var startPageToken *drive.StartPageToken
 	err = f.pacer.Call(func() (bool, error) {
-		changes := f.svc.Changes.GetStartPageToken().SupportsAllDrives(true)
+		changes := lease.service.Changes.GetStartPageToken().SupportsAllDrives(true)
 		if f.isTeamDrive {
 			changes.DriveId(f.opt.TeamDriveID)
 		}
 		startPageToken, err = changes.Context(ctx).Do()
-		return f.shouldRetry(ctx, err)
+		return f.shouldRetryLease(ctx, err, lease)
 	})
 	if err != nil {
 		return
@@ -3286,13 +3490,13 @@ func (f *Fs) changeNotifyStartPageToken(ctx context.Context) (pageToken string, 
 	return startPageToken.StartPageToken, nil
 }
 
-func (f *Fs) changeNotifyRunner(ctx context.Context, notifyFunc func(string, fs.EntryType), startPageToken string) (newStartPageToken string, err error) {
+func (f *Fs) changeNotifyRunner(ctx context.Context, notifyFunc func(string, fs.EntryType), startPageToken string, lease *fcloneServiceLease) (newStartPageToken string, err error) {
 	pageToken := startPageToken
 	for {
 		var changeList *drive.ChangeList
 
 		err = f.pacer.Call(func() (bool, error) {
-			changesCall := f.svc.Changes.List(pageToken).
+			changesCall := lease.service.Changes.List(pageToken).
 				Fields("nextPageToken,newStartPageToken,changes(fileId,file(name,parents,mimeType))")
 			if f.opt.ListChunk > 0 {
 				changesCall.PageSize(f.opt.ListChunk)
@@ -3308,7 +3512,7 @@ func (f *Fs) changeNotifyRunner(ctx context.Context, notifyFunc func(string, fs.
 			}
 			changesCall.RestrictToMyDrive(!f.opt.SharedWithMe)
 			changeList, err = changesCall.Context(ctx).Do()
-			return f.shouldRetry(ctx, err)
+			return f.shouldRetryLeaseWithToken(ctx, err, lease, true)
 		})
 		if err != nil {
 			return
@@ -3402,6 +3606,17 @@ func (f *Fs) changeChunkSize(chunkSizeString string) (err error) {
 
 func (f *Fs) changeServiceAccountFile(ctx context.Context, file string) (err error) {
 	fs.Debugf(nil, "Changing Service Account File from %s to %s", f.opt.ServiceAccountFile, file)
+	if f.fcloneAccounts != nil {
+		if sameFcloneCredentialFile(f.fcloneAccounts.activeFile(), file) {
+			return nil
+		}
+		if err := f.fcloneAccounts.activateFile(ctx, file); err != nil {
+			return fmt.Errorf("drive: failed when activating pooled oauth client: %w", err)
+		}
+		f.opt.ServiceAccountFile = file
+		f.opt.ServiceAccountCredentials = ""
+		return nil
+	}
 	if file == f.opt.ServiceAccountFile {
 		return nil
 	}
@@ -3521,13 +3736,20 @@ func (f *Fs) makeShortcut(ctx context.Context, srcPath string, dstFs *Fs, dstPat
 // List all team drives
 func (f *Fs) listTeamDrives(ctx context.Context) (drives []*drive.Drive, err error) {
 	drives = []*drive.Drive{}
-	listTeamDrives := f.svc.Drives.List().PageSize(100)
-	var defaultFs Fs // default Fs with default Options
+	lease, err := f.fcloneNewServiceLease(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pageToken := ""
 	for {
 		var teamDrives *drive.DriveList
 		err = f.pacer.Call(func() (bool, error) {
-			teamDrives, err = listTeamDrives.Context(ctx).Do()
-			return defaultFs.shouldRetry(ctx, err)
+			call := lease.service.Drives.List().PageSize(100)
+			if pageToken != "" {
+				call.PageToken(pageToken)
+			}
+			teamDrives, err = call.Context(ctx).Do()
+			return f.shouldRetryLeaseWithToken(ctx, err, lease, pageToken != "")
 		})
 		if err != nil {
 			return drives, fmt.Errorf("listing Team Drives failed: %w", err)
@@ -3536,7 +3758,7 @@ func (f *Fs) listTeamDrives(ctx context.Context) (drives []*drive.Drive, err err
 		if teamDrives.NextPageToken == "" {
 			break
 		}
-		listTeamDrives.PageToken(teamDrives.NextPageToken)
+		pageToken = teamDrives.NextPageToken
 	}
 	return drives, nil
 }
@@ -3653,30 +3875,36 @@ func (f *Fs) copyOrMoveID(ctx context.Context, operation string, id, dest string
 
 // Run the drive query calling fn on each entry found
 func (f *Fs) queryFn(ctx context.Context, query string, fn func(*drive.File)) (err error) {
-	list := f.svc.Files.List()
-	if query != "" {
-		list.Q(query)
-	}
-
-	if f.opt.ListChunk > 0 {
-		list.PageSize(f.opt.ListChunk)
-	}
-	list.SupportsAllDrives(true)
-	list.IncludeItemsFromAllDrives(true)
-	if f.isTeamDrive && !f.opt.SharedWithMe {
-		list.DriveId(f.opt.TeamDriveID)
-		list.Corpora("drive")
-	}
-	// If using appDataFolder then need to add Spaces
-	if f.rootFolderID == "appDataFolder" {
-		list.Spaces("appDataFolder")
+	lease, err := f.fcloneNewServiceLease(ctx)
+	if err != nil {
+		return err
 	}
 	fields := fmt.Sprintf("files(%s),nextPageToken,incompleteSearch", f.getFileFields(ctx))
+	pageToken := ""
 	for {
 		var files *drive.FileList
 		err = f.pacer.Call(func() (bool, error) {
+			list := lease.service.Files.List()
+			if query != "" {
+				list.Q(query)
+			}
+			if f.opt.ListChunk > 0 {
+				list.PageSize(f.opt.ListChunk)
+			}
+			list.SupportsAllDrives(true)
+			list.IncludeItemsFromAllDrives(true)
+			if f.isTeamDrive && !f.opt.SharedWithMe {
+				list.DriveId(f.opt.TeamDriveID)
+				list.Corpora("drive")
+			}
+			if f.rootFolderID == "appDataFolder" {
+				list.Spaces("appDataFolder")
+			}
+			if pageToken != "" {
+				list.PageToken(pageToken)
+			}
 			files, err = list.Fields(googleapi.Field(fields)).Context(ctx).Do()
-			return f.shouldRetry(ctx, err)
+			return f.shouldRetryLeaseWithToken(ctx, err, lease, pageToken != "")
 		})
 		if err != nil {
 			return fmt.Errorf("failed to execute query: %w", err)
@@ -3690,7 +3918,7 @@ func (f *Fs) queryFn(ctx context.Context, query string, fn func(*drive.File)) (e
 		if files.NextPageToken == "" {
 			break
 		}
-		list.PageToken(files.NextPageToken)
+		pageToken = files.NextPageToken
 	}
 	return nil
 }
@@ -4025,11 +4253,17 @@ rclone backend rescue drive: -o delete
 // If it is a string or a []string it will be shown to the user
 // otherwise it will be JSON encoded and shown to the user like that
 func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[string]string) (out any, err error) {
+	if handled, fcloneOut, fcloneErr := f.fcloneSharedDriveCommand(ctx, name, arg, opt); handled {
+		return fcloneOut, fcloneErr
+	}
 	switch name {
 	case "get":
 		out := make(map[string]string)
 		if _, ok := opt["service_account_file"]; ok {
 			out["service_account_file"] = f.opt.ServiceAccountFile
+			if active := f.fcloneAccounts.activeFile(); active != "" {
+				out["service_account_file"] = active
+			}
 		}
 		if _, ok := opt["chunk_size"]; ok {
 			out["chunk_size"] = f.opt.ChunkSize.String()
@@ -4040,6 +4274,9 @@ func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[str
 		if serviceAccountFile, ok := opt["service_account_file"]; ok {
 			serviceAccountMap := make(map[string]string)
 			serviceAccountMap["previous"] = f.opt.ServiceAccountFile
+			if active := f.fcloneAccounts.activeFile(); active != "" {
+				serviceAccountMap["previous"] = active
+			}
 			if err = f.changeServiceAccountFile(ctx, serviceAccountFile); err != nil {
 				return out, err
 			}
@@ -4494,15 +4731,19 @@ func (o *baseObject) update(ctx context.Context, updateInfo *drive.File, uploadM
 	// Make the API request to upload metadata and file data.
 	size := src.Size()
 	if size >= 0 && size < int64(o.fs.opt.UploadCutoff) {
+		lease, leaseErr := o.fs.fcloneNewServiceLease(ctx)
+		if leaseErr != nil {
+			return nil, leaseErr
+		}
 		// Don't retry, return a retry error instead
 		err = o.fs.pacer.CallNoRetry(func() (bool, error) {
-			info, err = o.fs.svc.Files.Update(actualID(o.id), updateInfo).
+			info, err = lease.service.Files.Update(actualID(o.id), updateInfo).
 				Media(in, googleapi.ContentType(uploadMimeType), googleapi.ChunkSize(0)).
 				Fields(partialFields).
 				SupportsAllDrives(true).
 				KeepRevisionForever(o.fs.opt.KeepRevisionForever).
 				Context(ctx).Do()
-			return o.fs.shouldRetry(ctx, err)
+			return o.fs.shouldRetryLease(ctx, err, lease)
 		})
 		return
 	}

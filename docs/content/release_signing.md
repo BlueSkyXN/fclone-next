@@ -1,9 +1,17 @@
 ---
-title: "Release Signing"
-description: "How the release is signed and how to check the signature."
+title: "Upstream rclone release signing"
+description: "Archived upstream reference; it does not describe fclone releases."
 ---
 
-# Release signing
+# Upstream rclone release signing
+
+> **This page does not apply to fclone releases.** fclone v0.1.0 publishes
+> unsigned SHA-256 checksum files with its GitHub Release assets. A checksum
+> can detect an accidental or post-download file change, but it does not
+> independently authenticate the publisher. Download both the archive and
+> checksum only from <https://github.com/BlueSkyXN/fclone-next/releases>.
+>
+> The remainder of this page is retained solely as upstream rclone reference.
 
 The hashes of the binary artefacts of the rclone release are signed
 with a public PGP/GPG key. This can be verified manually as described
