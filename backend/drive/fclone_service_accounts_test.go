@@ -51,6 +51,28 @@ func TestPrepareFcloneServiceAccountPoolPreservesExplicitAccount(t *testing.T) {
 	assert.Equal(t, explicit, pool.currentFile)
 }
 
+func TestPrepareFcloneServiceAccountPoolValidatesLimits(t *testing.T) {
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "a.json"), []byte("{}"), 0o600))
+
+	t.Run("negative services_max", func(t *testing.T) {
+		opt := Options{ServiceAccountFilePath: directory, ServicesMax: -1}
+		_, err := prepareFcloneServiceAccountPool(&opt)
+		require.EqualError(t, err, "fclone: services_max must be zero or greater")
+	})
+	t.Run("negative min sleep", func(t *testing.T) {
+		opt := Options{ServiceAccountFilePath: directory, ServiceAccountMinSleep: fs.Duration(-time.Second)}
+		_, err := prepareFcloneServiceAccountPool(&opt)
+		require.EqualError(t, err, "fclone: service_account_min_sleep must be zero or greater")
+	})
+	t.Run("zero services_max uses default", func(t *testing.T) {
+		opt := Options{ServiceAccountFilePath: directory}
+		pool, err := prepareFcloneServiceAccountPool(&opt)
+		require.NoError(t, err)
+		assert.Equal(t, fcloneDefaultServicesMax, pool.max)
+	})
+}
+
 type fcloneRoundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (fn fcloneRoundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {

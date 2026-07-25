@@ -132,8 +132,14 @@ func prepareFcloneServiceAccountPool(opt *Options) (*fcloneServiceAccountPool, e
 		return nil, fmt.Errorf("fclone: no JSON credentials found in service_account_file_path %q", directory)
 	}
 
+	if opt.ServicesMax < 0 {
+		return nil, errors.New("fclone: services_max must be zero or greater")
+	}
+	if opt.ServiceAccountMinSleep < 0 {
+		return nil, errors.New("fclone: service_account_min_sleep must be zero or greater")
+	}
 	max := opt.ServicesMax
-	if max <= 0 {
+	if max == 0 {
 		max = fcloneDefaultServicesMax
 	}
 	preload := opt.ServicesPreload
