@@ -68,10 +68,10 @@ jobs:
       - name: Build and inspect fclone
         if: matrix.go == '1.26.5'
         run: |
-          make fclone FCLONE_VERSION=v0.1.0-ci
+          make fclone FCLONE_VERSION=v0.1.1-ci
           core_version="$(sed -n 's/^var VersionTag = "\([^"]*\)"/\1/p' fs/versiontag.go)-DEV"
           ./fclone version
-          ./fclone version | grep -F 'fclone v0.1.0-ci'
+          ./fclone version | grep -F 'fclone v0.1.1-ci'
           ./fclone version | grep -F -- "- rclone ${core_version}"
           ./fclone version --check >version-check.txt 2>&1
           grep -F 'official rclone releases are disabled' version-check.txt
@@ -80,7 +80,7 @@ jobs:
         if: matrix.go == '1.26.5'
         run: |
           go build -o fclone-default .
-          ./fclone-default version | grep -F 'fclone v0.1.0-dev'
+          ./fclone-default version | grep -F 'fclone v0.1.1-dev'
           if ./fclone-default selfupdate >selfupdate.txt 2>&1; then
             echo 'selfupdate unexpectedly succeeded' >&2
             exit 1
@@ -132,7 +132,7 @@ jobs:
             fi
             version="${GITHUB_REF_NAME#fclone-}"
           else
-            version="v0.1.0-dev.${GITHUB_SHA:0:8}"
+            version="v0.1.1-dev.${GITHUB_SHA:0:8}"
           fi
           echo "FCLONE_BUILD_VERSION=$version" >> "$GITHUB_ENV"
 
