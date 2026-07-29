@@ -15,7 +15,7 @@ permissions:
 
 concurrency:
   group: fclone-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
   test:
@@ -31,19 +31,22 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: ${{ matrix.go }}
           check-latest: true
           cache: true
 
-      - name: Install NFS client
+      - name: Configure FUSE and NFS clients
         run: |
           sudo apt-get update
-          sudo apt-get install -y nfs-common
+          sudo apt-get install -y fuse3 nfs-common
+          sudo modprobe fuse
+          sudo chmod 666 /dev/fuse
+          sudo chown root:"$USER" /etc/fuse.conf
 
       - name: Install test binary
         run: |
@@ -55,9 +58,9 @@ jobs:
           RCLONE_CONFIG: /notfound
         run: make fclone-quicktest
 
-      - name: Vet changed packages
+      - name: Vet all packages
         if: matrix.go == '1.26.5'
-        run: go vet ./backend/drive ./fs/cache ./fs/sync ./fs/accounting ./cmd/...
+        run: go vet ./...
 
       - name: Race-test compatibility packages
         if: matrix.go == '1.26.5'
@@ -87,9 +90,99 @@ jobs:
           fi
           grep -F 'unknown command "selfupdate"' selfupdate.txt
 
+  quality:
+    name: Code quality and vulnerability scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 2
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.26.5"
+          check-latest: true
+          cache: true
+
+      - name: Verify release metadata isolation
+        run: |
+          make -s vars CURRENT_TAGS=fclone-v9.9.9 >fclone-vars.txt 2>fclone-vars.err
+          if [[ -s fclone-vars.err ]]; then
+            cat fclone-vars.err >&2
+            exit 1
+          fi
+          if grep -F "TAG='fclone-v9.9.9'" fclone-vars.txt; then
+            echo 'fclone tag unexpectedly changed rclone release metadata' >&2
+            exit 1
+          fi
+
+          git tag v999.998.0 HEAD^
+          git tag v999.999.0 HEAD
+          make -s vars \
+            "CURRENT_TAGS=fclone-v9.9.9 v999.999.0" \
+            VERSION=v999.999.0 \
+            >rclone-vars.txt 2>rclone-vars.err
+          if [[ -s rclone-vars.err ]]; then
+            cat rclone-vars.err >&2
+            exit 1
+          fi
+          grep -Fx "TAG='v999.999.0'" rclone-vars.txt
+          grep -Fx "LAST_TAG='v999.998.0'" rclone-vars.txt
+
+      - name: Verify module files
+        run: |
+          go mod verify
+          go mod tidy -diff
+
+      - name: Lint fork workflows
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          actionlint .github/workflows/fclone.yml .github/workflows/winget.yml
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.12.2
+          skip-cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+
+      - name: Scan for vulnerabilities
+        run: govulncheck ./...
+
+  native_windows:
+    name: Native Windows compile
+    needs: quality
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.26.5"
+          check-latest: true
+          cache: true
+
+      - name: Compile all packages
+        env:
+          RCLONE_CONFIG: "C:\\notfound"
+        run: go test -tags noselfupdate -run '^$' ./...
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
-    needs: test
+    needs:
+      - test
+      - quality
+      - native_windows
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -112,12 +205,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.ref }}
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: "1.26.5"
           check-latest: true
@@ -183,29 +276,56 @@ jobs:
           (cd dist && sha256sum "$archive_name" > "${archive_name}.sha256")
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: fclone-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*
           if-no-files-found: error
 
+  gate:
+    name: fclone CI
+    if: always()
+    needs:
+      - test
+      - quality
+      - native_windows
+      - build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Verify required jobs passed
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          NATIVE_WINDOWS_RESULT: ${{ needs.native_windows.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          if [[ "$TEST_RESULT" != "success" || \
+                "$QUALITY_RESULT" != "success" || \
+                "$NATIVE_WINDOWS_RESULT" != "success" || \
+                "$BUILD_RESULT" != "success" ]]; then
+            echo "required jobs: test=$TEST_RESULT quality=$QUALITY_RESULT native_windows=$NATIVE_WINDOWS_RESULT build=$BUILD_RESULT" >&2
+            exit 1
+          fi
+
   release:
     name: Create draft GitHub Release
-    if: startsWith(github.ref, 'refs/tags/fclone-v')
-    needs: build
+    if: startsWith(github.ref, 'refs/tags/fclone-v') && needs.gate.result == 'success'
+    needs: gate
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
       - name: Checkout tag
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.ref }}
           fetch-depth: 0
 
       - name: Download artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: fclone-*
           path: dist

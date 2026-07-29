@@ -2,7 +2,7 @@
 
 fclone is a compatibility-focused derivative of
 [rclone](https://github.com/rclone/rclone), currently based on the rclone
-v1.75.0 development line at upstream commit `c99b2d11e`. It
+v1.75.0 development line at upstream commit `17629d67b`. It
 reimplements the useful behavior of the historical fclone/gclone family on a
 current rclone core while preserving normal rclone configuration and command
 semantics.
@@ -213,6 +213,7 @@ directories to and from different cloud storage providers.
 - RackCorp Object Storage [:page_facing_up:](https://rclone.org/s3/#RackCorp)
 - rsync.net [:page_facing_up:](https://rclone.org/sftp/#rsync-net)
 - Scaleway [:page_facing_up:](https://rclone.org/s3/#scaleway)
+- Scality (RING / ARTESCA) [:page_facing_up:](https://rclone.org/s3/#scality)
 - Seafile [:page_facing_up:](https://rclone.org/seafile/)
 - Seagate Lyve Cloud [:page_facing_up:](https://rclone.org/s3/#lyve)
 - SeaweedFS [:page_facing_up:](https://rclone.org/s3/#seaweedfs)
@@ -232,6 +233,7 @@ directories to and from different cloud storage providers.
 - WebDAV [:page_facing_up:](https://rclone.org/webdav/)
 - Yandex Disk [:page_facing_up:](https://rclone.org/yandex/)
 - Zadara Object Storage [:page_facing_up:](https://rclone.org/s3/#zadara)
+- Zero Services (ZERO-Z3) [:page_facing_up:](https://rclone.org/s3/#zero-z3)
 - Zoho WorkDrive [:page_facing_up:](https://rclone.org/zoho/)
 - Zata.ai [:page_facing_up:](https://rclone.org/s3/#Zata)
 - The local filesystem [:page_facing_up:](https://rclone.org/local/)

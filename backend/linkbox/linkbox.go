@@ -179,9 +179,20 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	if err != nil {
 		// Assume it is a file
 		newRoot, remote := dircache.SplitPath(root)
-		tempF := *f //nolint:govet // copying mutex is OK here as it is a new Fs
-		tempF.dirCache = dircache.New(newRoot, rootID, &tempF)
-		tempF.root = newRoot
+		// Copy the initialized state explicitly so tempF gets its own mutex.
+		tempF := &Fs{
+			name:     f.name,
+			root:     newRoot,
+			opt:      f.opt,
+			features: f.features,
+			ci:       f.ci,
+			srv:      f.srv,
+			cdnSrv:   f.cdnSrv,
+			pacer:    f.pacer,
+			m:        f.m,
+			webToken: f.webToken,
+		}
+		tempF.dirCache = dircache.New(newRoot, rootID, tempF)
 		// Make new Fs which is the parent
 		err = tempF.dirCache.FindRoot(ctx, false)
 		if err != nil {
@@ -196,7 +207,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 			}
 			return nil, err
 		}
-		f.features.Fill(ctx, &tempF)
+		f.features.Fill(ctx, tempF)
 		// XXX: update the old f here instead of returning tempF, since
 		// `features` were already filled with functions having *f as a receiver.
 		// See https://github.com/rclone/rclone/issues/2182

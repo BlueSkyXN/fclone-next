@@ -146,6 +146,13 @@ func TestFcloneSharedDriveIDRequiresRoot(t *testing.T) {
 			want: "drive-id",
 		},
 		{
+			name: "empty shared drive ID",
+			fs: Fs{
+				isTeamDrive: true,
+			},
+			wantErr: "Shared Drive ID is empty",
+		},
+		{
 			name: "remote subdirectory",
 			fs: Fs{
 				isTeamDrive:  true,

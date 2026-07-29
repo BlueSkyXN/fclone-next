@@ -1,19 +1,20 @@
 SHELL = bash
 # Branch we are working on
 BRANCH := $(or $(BUILD_SOURCEBRANCHNAME),$(lastword $(subst /, ,$(GITHUB_REF))),$(shell git rev-parse --abbrev-ref HEAD))
-# Tag of the current commit, if any.  If this is not "" then we are building a release
-RELEASE_TAG := $(shell git tag -l --points-at HEAD)
+# Rclone release tag of the current commit, if any. fclone tags use separate metadata.
+CURRENT_TAGS := $(shell git tag -l --points-at HEAD)
+RELEASE_TAG := $(firstword $(filter v%,$(CURRENT_TAGS)))
 # Version of last release (may not be on this branch)
 VERSION := $(shell cat VERSION)
-# Last tag on this branch
-LAST_TAG := $(shell git describe --tags --abbrev=0)
+# Last rclone tag on this branch
+LAST_TAG := $(shell git describe --tags --abbrev=0 --match 'v*' 2>/dev/null)
 # Next version
 NEXT_VERSION := $(shell echo $(VERSION) | awk -F. -v OFS=. '{print $$1,$$2+1,0}')
 NEXT_PATCH_VERSION := $(shell echo $(VERSION) | awk -F. -v OFS=. '{print $$1,$$2,$$3+1}')
 # If we are working on a release, override branch to master
 ifdef RELEASE_TAG
 	BRANCH := master
-	LAST_TAG := $(shell git describe --abbrev=0 --tags $(VERSION)^)
+	LAST_TAG := $(shell git describe --abbrev=0 --tags --match 'v*' $(VERSION)^)
 endif
 TAG_BRANCH := .$(BRANCH)
 BRANCH_PATH := branch/$(BRANCH)/
@@ -89,6 +90,7 @@ vars:
 	@echo BRANCH="'$(BRANCH)'"
 	@echo TAG="'$(TAG)'"
 	@echo VERSION="'$(VERSION)'"
+	@echo LAST_TAG="'$(LAST_TAG)'"
 	@echo GO_VERSION="'$(GO_VERSION)'"
 	@echo FCLONE_VERSION="'$(FCLONE_VERSION)'"
 	@echo RCLONE_BASE_VERSION="'$(RCLONE_BASE_VERSION)'"
