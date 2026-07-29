@@ -278,88 +278,9 @@ func (f *Fs) Precision() time.Duration {
 // Will only be called if src.Fs().Name() == f.Name()
 //
 // If it isn't possible then return fs.ErrorCantCopy
-//
-//nolint:all
 func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
-	// ICloud cooy endpoint is broken. Once they fixed it this can be re-enabled.
+	// The iCloud copy endpoint is not reliable enough for server-side copies.
 	return nil, fs.ErrorCantCopy
-
-	// note: so many calls its only just faster then a reupload for big files.
-	srcObj, ok := src.(*Object)
-	if !ok {
-		fs.Debugf(src, "Can't copy - not same remote type")
-		return nil, fs.ErrorCantCopy
-	}
-
-	file, pathID, _, err := f.FindPath(ctx, remote, true)
-	if err != nil {
-		return nil, err
-	}
-
-	var resp *http.Response
-	var info *api.DriveItemRaw
-
-	// make a copy
-	if err = f.pacer.Call(func() (bool, error) {
-		info, resp, err = f.service.CopyDocByItemID(ctx, srcObj.itemID)
-		return retryResultUnknown(ctx, resp, err)
-	}); err != nil {
-		return nil, err
-	}
-
-	// renaming in CopyDocByID endpoint does not work :/ so do it the hard way
-
-	// get new document
-	var doc *api.Document
-	if err = f.pacer.Call(func() (bool, error) {
-		doc, resp, err = f.service.GetDocByItemID(ctx, info.ItemID)
-		return shouldRetry(ctx, resp, err)
-	}); err != nil {
-		return nil, err
-	}
-
-	// get parentdrive id
-	var dirDoc *api.Document
-	if err = f.pacer.Call(func() (bool, error) {
-		dirDoc, resp, err = f.service.GetDocByItemID(ctx, pathID)
-		return shouldRetry(ctx, resp, err)
-	}); err != nil {
-		return nil, err
-	}
-
-	// build request
-	// can't use normal rename as file needs to be "activated" first
-
-	r := api.NewUpdateFileInfo()
-	r.DocumentID = doc.DocumentID
-	r.Path.Path = file
-	r.Path.StartingDocumentID = dirDoc.DocumentID
-	r.Data.Signature = doc.Data.Signature
-	r.Data.ReferenceSignature = doc.Data.ReferenceSignature
-	r.Data.WrappingKey = doc.Data.WrappingKey
-	r.Data.Size = doc.Data.Size
-	r.Mtime = srcObj.modTime.UnixMilli()
-	r.Btime = srcObj.modTime.UnixMilli()
-
-	var item *api.DriveItem
-	if err = f.pacer.Call(func() (bool, error) {
-		item, resp, err = f.service.UpdateFile(ctx, &r)
-		return retryResultUnknown(ctx, resp, err)
-	}); err != nil {
-		return nil, err
-	}
-
-	o, err := f.NewObjectFromDriveItem(ctx, remote, item)
-	if err != nil {
-		return nil, err
-	}
-	obj := o.(*Object)
-
-	// cheat unit tests
-	obj.modTime = srcObj.modTime
-	obj.createdTime = srcObj.createdTime
-
-	return obj, nil
 }
 
 // Put in to the remote path with the modTime given of the given size

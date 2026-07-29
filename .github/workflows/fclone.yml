@@ -15,7 +15,7 @@ permissions:
 
 concurrency:
   group: fclone-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
   test:
@@ -31,10 +31,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: ${{ matrix.go }}
           check-latest: true
@@ -55,9 +55,9 @@ jobs:
           RCLONE_CONFIG: /notfound
         run: make fclone-quicktest
 
-      - name: Vet changed packages
+      - name: Vet all packages
         if: matrix.go == '1.26.5'
-        run: go vet ./backend/drive ./fs/cache ./fs/sync ./fs/accounting ./cmd/...
+        run: go vet ./...
 
       - name: Race-test compatibility packages
         if: matrix.go == '1.26.5'
@@ -94,12 +94,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 2
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: "1.26.5"
           check-latest: true
@@ -141,7 +141,7 @@ jobs:
           actionlint .github/workflows/fclone.yml .github/workflows/winget.yml
 
       - name: Lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.12.2
           skip-cache: true
@@ -152,9 +152,34 @@ jobs:
       - name: Scan for vulnerabilities
         run: govulncheck ./...
 
+  native_windows:
+    name: Native Windows compile
+    needs: quality
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.26.5"
+          check-latest: true
+          cache: true
+
+      - name: Compile all packages
+        env:
+          RCLONE_CONFIG: "C:\\notfound"
+        run: go test -tags noselfupdate -run '^$' ./...
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
-    needs: test
+    needs:
+      - test
+      - quality
+      - native_windows
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -177,12 +202,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.ref }}
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: "1.26.5"
           check-latest: true
@@ -248,7 +273,7 @@ jobs:
           (cd dist && sha256sum "$archive_name" > "${archive_name}.sha256")
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: fclone-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*
@@ -260,6 +285,7 @@ jobs:
     needs:
       - test
       - quality
+      - native_windows
       - build
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -269,12 +295,14 @@ jobs:
         env:
           TEST_RESULT: ${{ needs.test.result }}
           QUALITY_RESULT: ${{ needs.quality.result }}
+          NATIVE_WINDOWS_RESULT: ${{ needs.native_windows.result }}
           BUILD_RESULT: ${{ needs.build.result }}
         run: |
           if [[ "$TEST_RESULT" != "success" || \
                 "$QUALITY_RESULT" != "success" || \
+                "$NATIVE_WINDOWS_RESULT" != "success" || \
                 "$BUILD_RESULT" != "success" ]]; then
-            echo "required jobs: test=$TEST_RESULT quality=$QUALITY_RESULT build=$BUILD_RESULT" >&2
+            echo "required jobs: test=$TEST_RESULT quality=$QUALITY_RESULT native_windows=$NATIVE_WINDOWS_RESULT build=$BUILD_RESULT" >&2
             exit 1
           fi
 
@@ -288,13 +316,13 @@ jobs:
 
     steps:
       - name: Checkout tag
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.ref }}
           fetch-depth: 0
 
       - name: Download artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: fclone-*
           path: dist
