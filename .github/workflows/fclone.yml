@@ -87,6 +87,68 @@ jobs:
           fi
           grep -F 'unknown command "selfupdate"' selfupdate.txt
 
+  quality:
+    name: Code quality and vulnerability scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.5"
+          check-latest: true
+          cache: true
+
+      - name: Verify release metadata isolation
+        run: |
+          make -s vars CURRENT_TAGS=fclone-v9.9.9 >fclone-vars.txt 2>fclone-vars.err
+          if [[ -s fclone-vars.err ]]; then
+            cat fclone-vars.err >&2
+            exit 1
+          fi
+          if grep -F "TAG='fclone-v9.9.9'" fclone-vars.txt; then
+            echo 'fclone tag unexpectedly changed rclone release metadata' >&2
+            exit 1
+          fi
+
+          make -s vars \
+            "CURRENT_TAGS=fclone-v9.9.9 v1.74.0" \
+            VERSION=v1.74.0 \
+            >rclone-vars.txt 2>rclone-vars.err
+          if [[ -s rclone-vars.err ]]; then
+            cat rclone-vars.err >&2
+            exit 1
+          fi
+          grep -Fx "TAG='v1.74.0'" rclone-vars.txt
+
+      - name: Verify module files
+        run: |
+          go mod verify
+          go mod tidy -diff
+
+      - name: Lint fork workflows
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          actionlint .github/workflows/fclone.yml .github/workflows/winget.yml
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          skip-cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+
+      - name: Scan for vulnerabilities
+        run: govulncheck ./...
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     needs: test
@@ -189,10 +251,34 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  gate:
+    name: fclone CI
+    if: always()
+    needs:
+      - test
+      - quality
+      - build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Verify required jobs passed
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          if [[ "$TEST_RESULT" != "success" || \
+                "$QUALITY_RESULT" != "success" || \
+                "$BUILD_RESULT" != "success" ]]; then
+            echo "required jobs: test=$TEST_RESULT quality=$QUALITY_RESULT build=$BUILD_RESULT" >&2
+            exit 1
+          fi
+
   release:
     name: Create draft GitHub Release
-    if: startsWith(github.ref, 'refs/tags/fclone-v')
-    needs: build
+    if: startsWith(github.ref, 'refs/tags/fclone-v') && needs.gate.result == 'success'
+    needs: gate
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -8,6 +8,8 @@ permissions:
 
 jobs:
   publish:
+    # This publishes the official rclone package; forks need their own identity.
+    if: github.repository == 'rclone/rclone'
     runs-on: ubuntu-latest
     steps:
       - uses: vedantmgoyal2009/winget-releaser@v2

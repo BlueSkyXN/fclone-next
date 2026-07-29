@@ -277,7 +277,7 @@ func (f *Fs) fcloneSharedDriveID(requireRoot bool) (string, error) {
 		id = f.rootFolderID
 	}
 	if id == "" {
-		return "", errors.New("Shared Drive ID is empty")
+		return "", errors.New("shared drive ID is empty")
 	}
 	if requireRoot {
 		if f.root != "" {
