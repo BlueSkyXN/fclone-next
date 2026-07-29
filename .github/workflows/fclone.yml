@@ -4,7 +4,7 @@ name: fclone
 on:
   push:
     branches:
-      - "**"
+      - master
     tags:
       - "fclone-v*"
   pull_request:
