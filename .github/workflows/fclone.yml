@@ -20,8 +20,8 @@ concurrency:
 jobs:
   test:
     name: Go ${{ matrix.go }} test
-    # FUSE integration tests require a runner image that permits mounts.
-    runs-on: ubuntu-22.04
+    # FUSE integration tests run separately with the mount privileges they require.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -54,10 +54,29 @@ jobs:
           go install -tags noselfupdate .
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      - name: Test
+      - name: Test non-FUSE packages
         env:
           RCLONE_CONFIG: /notfound
-        run: make fclone-quicktest
+        run: |
+          packages=()
+          while IFS= read -r package; do
+            case "$package" in
+              */cmd/mount | */cmd/mount2) ;;
+              *) packages+=("$package") ;;
+            esac
+          done < <(go list ./...)
+          go test -tags noselfupdate "${packages[@]}"
+
+      - name: Test FUSE packages with mount privileges
+        env:
+          RCLONE_CONFIG: /notfound
+        run: |
+          go test -tags noselfupdate -c -o "$RUNNER_TEMP/mount.test" ./cmd/mount
+          go test -tags noselfupdate -c -o "$RUNNER_TEMP/mount2.test" ./cmd/mount2
+          sudo env "PATH=$PATH" "RCLONE_CONFIG=$RCLONE_CONFIG" \
+            "$RUNNER_TEMP/mount.test" -test.v
+          sudo env "PATH=$PATH" "RCLONE_CONFIG=$RCLONE_CONFIG" \
+            "$RUNNER_TEMP/mount2.test" -test.v
 
       - name: Vet all packages
         if: matrix.go == '1.26.5'
