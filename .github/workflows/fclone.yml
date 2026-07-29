@@ -40,10 +40,13 @@ jobs:
           check-latest: true
           cache: true
 
-      - name: Install NFS client
+      - name: Configure FUSE and NFS clients
         run: |
           sudo apt-get update
-          sudo apt-get install -y nfs-common
+          sudo apt-get install -y fuse3 nfs-common
+          sudo modprobe fuse
+          sudo chmod 666 /dev/fuse
+          sudo chown root:"$USER" /etc/fuse.conf
 
       - name: Install test binary
         run: |
