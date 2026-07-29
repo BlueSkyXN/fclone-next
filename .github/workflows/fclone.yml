@@ -20,8 +20,8 @@ concurrency:
 jobs:
   test:
     name: Go ${{ matrix.go }} test
-    # FUSE integration tests require a runner image that permits mounts.
-    runs-on: ubuntu-22.04
+    # FUSE integration tests run separately with the mount privileges they require.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
