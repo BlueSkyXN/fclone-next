@@ -14,7 +14,7 @@ NEXT_PATCH_VERSION := $(shell echo $(VERSION) | awk -F. -v OFS=. '{print $$1,$$2
 # If we are working on a release, override branch to master
 ifdef RELEASE_TAG
 	BRANCH := master
-	LAST_TAG := $(shell git describe --abbrev=0 --tags $(VERSION)^)
+	LAST_TAG := $(shell git describe --abbrev=0 --tags --match 'v*' $(VERSION)^)
 endif
 TAG_BRANCH := .$(BRANCH)
 BRANCH_PATH := branch/$(BRANCH)/
@@ -90,6 +90,7 @@ vars:
 	@echo BRANCH="'$(BRANCH)'"
 	@echo TAG="'$(TAG)'"
 	@echo VERSION="'$(VERSION)'"
+	@echo LAST_TAG="'$(LAST_TAG)'"
 	@echo GO_VERSION="'$(GO_VERSION)'"
 	@echo FCLONE_VERSION="'$(FCLONE_VERSION)'"
 	@echo RCLONE_BASE_VERSION="'$(RCLONE_BASE_VERSION)'"

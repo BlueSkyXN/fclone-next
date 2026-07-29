@@ -96,7 +96,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 2
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -117,15 +117,18 @@ jobs:
             exit 1
           fi
 
+          git tag v999.998.0 HEAD^
+          git tag v999.999.0 HEAD
           make -s vars \
-            "CURRENT_TAGS=fclone-v9.9.9 v1.74.0" \
-            VERSION=v1.74.0 \
+            "CURRENT_TAGS=fclone-v9.9.9 v999.999.0" \
+            VERSION=v999.999.0 \
             >rclone-vars.txt 2>rclone-vars.err
           if [[ -s rclone-vars.err ]]; then
             cat rclone-vars.err >&2
             exit 1
           fi
-          grep -Fx "TAG='v1.74.0'" rclone-vars.txt
+          grep -Fx "TAG='v999.999.0'" rclone-vars.txt
+          grep -Fx "LAST_TAG='v999.998.0'" rclone-vars.txt
 
       - name: Verify module files
         run: |
