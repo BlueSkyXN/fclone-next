@@ -2,7 +2,7 @@
 
 fclone is a compatibility-focused derivative of
 [rclone](https://github.com/rclone/rclone), currently based on the rclone
-v1.75.0 development line at upstream commit `17629d67b`. It
+v1.75.0 development line at upstream commit `bd4c6571e`. It
 reimplements the useful behavior of the historical fclone/gclone family on a
 current rclone core while preserving normal rclone configuration and command
 semantics.
