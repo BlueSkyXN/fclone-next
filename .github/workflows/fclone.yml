@@ -4,7 +4,7 @@ name: fclone
 on:
   push:
     branches:
-      - "**"
+      - master
     tags:
       - "fclone-v*"
   pull_request:
@@ -20,7 +20,8 @@ concurrency:
 jobs:
   test:
     name: Go ${{ matrix.go }} test
-    runs-on: ubuntu-latest
+    # FUSE integration tests require a runner image that permits mounts.
+    runs-on: ubuntu-22.04
     timeout-minutes: 60
     strategy:
       fail-fast: false

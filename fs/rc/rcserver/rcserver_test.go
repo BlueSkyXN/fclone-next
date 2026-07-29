@@ -19,6 +19,7 @@ import (
 
 	_ "github.com/rclone/rclone/backend/local"
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/config/configfile"
 	"github.com/rclone/rclone/fs/rc"
 	"github.com/stretchr/testify/assert"
@@ -413,6 +414,102 @@ func TestCheckServeRemote(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCheckServeRemoteRejectsNamedLocal(t *testing.T) {
+	const remoteName = "rc-server-local-test"
+	oldConfigPath := config.GetConfigPath()
+	oldData := config.Data()
+	require.NoError(t, config.SetConfigPath(filepath.Join(t.TempDir(), "rclone.conf")))
+	configfile.Install()
+	require.ErrorIs(t, config.Data().Load(), config.ErrorConfigFileNotFound)
+	defer func() {
+		require.NoError(t, config.SetConfigPath(oldConfigPath))
+		config.SetData(oldData)
+	}()
+	config.Data().SetValue(remoteName, "type", "local")
+
+	err := checkServeRemote(remoteName+":"+testFs, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "local backend")
+
+	assert.NoError(t, checkServeRemote(remoteName+":"+testFs, true))
+}
+
+func TestCheckServeRemotePath(t *testing.T) {
+	for _, test := range []struct {
+		path    string
+		wantErr bool
+	}{
+		{path: ""},
+		{path: "directory/file.txt"},
+		{path: "directory/.../file.txt"},
+		{path: "directory/.hidden"},
+		{path: "."},
+		{path: "..", wantErr: true},
+		{path: "../file.txt", wantErr: true},
+		{path: "directory/../file.txt", wantErr: true},
+		{path: "directory/./file.txt"},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			err := checkServeRemotePath(test.path)
+			if test.wantErr {
+				require.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
+func TestCheckServeLocalPath(t *testing.T) {
+	for _, test := range []struct {
+		path    string
+		wantErr bool
+	}{
+		{path: ""},
+		{path: "directory/file.txt"},
+		{path: "../file.txt", wantErr: true},
+		{path: "/absolute/file.txt", wantErr: true},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			err := checkServeLocalPath(test.path)
+			if test.wantErr {
+				require.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
+func TestServeRemoteRejectsParentTraversal(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	require.NoError(t, os.Mkdir(root, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "visible.txt"), []byte("visible"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(base, "secret.txt"), []byte("outside-root-content"), 0o600))
+
+	opt := newTestOpt()
+	opt.Serve = true
+	opt.NoAuth = true
+	server, err := newServer(context.Background(), &opt, http.NewServeMux())
+	require.NoError(t, err)
+
+	request := func(remotePath string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/[:local:"+filepath.ToSlash(root)+"]/"+remotePath, nil)
+		server.server.Router().ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	valid := request("visible.txt")
+	assert.Equal(t, http.StatusOK, valid.Code)
+	assert.Equal(t, "visible", valid.Body.String())
+
+	traversal := request("%2e%2e/secret.txt")
+	assert.Equal(t, http.StatusBadRequest, traversal.Code)
+	assert.NotContains(t, traversal.Body.String(), "outside-root-content")
 }
 
 // On an unauthenticated server the serve path must not instantiate

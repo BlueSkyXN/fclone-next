@@ -358,6 +358,9 @@ func checkServeRemote(fsName string, authenticated bool) error {
 	if err != nil {
 		return fmt.Errorf("invalid remote %q: %w", fsName, err)
 	}
+	if err := checkServeRemotePath(parsed.Path); err != nil {
+		return fmt.Errorf("invalid served remote root: %w", err)
+	}
 
 	// global.* connection string options mutate process-wide rclone config. Never honour these
 	// from a request-derived remote, even when the request is authenticated
@@ -381,6 +384,26 @@ func checkServeRemote(fsName string, authenticated bool) error {
 	case len(parsed.Config) > 0:
 		return errors.New("serving remotes with connection string parameters requires authentication to be set up on the rc server or the --rc-no-auth flag")
 	}
+	fsInfo, _, _, _, err := fs.ParseRemote(fsName)
+	if err == nil && fsInfo.Name == "local" {
+		return errors.New("serving a local backend requires authentication to be set up on the rc server or the --rc-no-auth flag")
+	}
+	return nil
+}
+
+func checkServeRemotePath(remotePath string) error {
+	for _, segment := range strings.Split(remotePath, "/") {
+		if segment == ".." {
+			return fmt.Errorf("path segment %q is not allowed", segment)
+		}
+	}
+	return nil
+}
+
+func checkServeLocalPath(remotePath string) error {
+	if remotePath != "" && !filepath.IsLocal(filepath.FromSlash(remotePath)) {
+		return fmt.Errorf("local path %q is not contained within the served root", remotePath)
+	}
 	return nil
 }
 
@@ -391,11 +414,21 @@ func (s *Server) serveRemote(w http.ResponseWriter, r *http.Request, path string
 		writeError(path, nil, w, err, http.StatusForbidden)
 		return
 	}
+	if err := checkServeRemotePath(path); err != nil {
+		writeError(path, nil, w, err, http.StatusBadRequest)
+		return
+	}
 	// Mark as an rc request e.g. so NewFs can reject global.* config
 	f, err := cache.Get(fs.WithRCRequest(s.ctx), fsName)
 	if err != nil {
 		writeError(path, nil, w, fmt.Errorf("failed to make Fs: %w", err), http.StatusInternalServerError)
 		return
+	}
+	if f.Features().IsLocal {
+		if err := checkServeLocalPath(strings.Trim(path, "/")); err != nil {
+			writeError(path, nil, w, err, http.StatusBadRequest)
+			return
+		}
 	}
 	if path == "" || strings.HasSuffix(path, "/") {
 		path = strings.Trim(path, "/")

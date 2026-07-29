@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -156,17 +157,22 @@ func (p *plexConnector) listenWebsocket() {
 					if v.State == "playing" {
 						// if it's not cached get the details and cache them
 						if _, found := p.stateCache.Get(v.Key); !found {
-							req, err := http.NewRequest("GET", fmt.Sprintf("%s%s", p.url.String(), v.Key), nil)
+							metadataURL, err := p.metadataURL(v.Key)
+							if err != nil {
+								continue
+							}
+							req, err := http.NewRequest("GET", metadataURL.String(), nil)
 							if err != nil {
 								continue
 							}
 							p.fillDefaultHeaders(req)
-							resp, err := http.DefaultClient.Do(req)
+							resp, err := p.do(req)
 							if err != nil {
 								continue
 							}
 							var data []byte
 							data, err = io.ReadAll(resp.Body)
+							_ = resp.Body.Close()
 							if err != nil {
 								continue
 							}
@@ -179,6 +185,76 @@ func (p *plexConnector) listenWebsocket() {
 			}
 		}
 	}()
+}
+
+func plexPort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
+}
+
+func samePlexOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		plexPort(a) == plexPort(b)
+}
+
+func (p *plexConnector) metadataURL(key string) (*url.URL, error) {
+	ref, err := url.Parse(key)
+	if err != nil {
+		return nil, fmt.Errorf("invalid plex metadata path: %w", err)
+	}
+	if ref.IsAbs() || ref.Host != "" || ref.User != nil {
+		return nil, errors.New("plex metadata path must not contain an authority")
+	}
+	for _, segment := range strings.Split(ref.Path, "/") {
+		if segment == ".." {
+			return nil, errors.New("plex metadata path must not contain parent segments")
+		}
+	}
+	base := *p.url
+	base.Path = strings.TrimRight(base.Path, "/") + "/"
+	base.RawPath = ""
+	ref.Path = strings.TrimLeft(ref.Path, "/")
+	ref.RawPath = ""
+	metadataURL := base.ResolveReference(ref)
+	if !samePlexOrigin(p.url, metadataURL) {
+		return nil, errors.New("plex metadata path changed the server origin")
+	}
+	return metadataURL, nil
+}
+
+func (p *plexConnector) checkRedirect(req *http.Request, via []*http.Request) error {
+	if !samePlexOrigin(p.url, req.URL) {
+		return errors.New("plex metadata redirect changed the server origin")
+	}
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	return nil
+}
+
+func (p *plexConnector) do(req *http.Request) (*http.Response, error) {
+	client := *http.DefaultClient
+	defaultCheckRedirect := client.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := p.checkRedirect(req, via); err != nil {
+			return err
+		}
+		if defaultCheckRedirect != nil {
+			return defaultCheckRedirect(req, via)
+		}
+		return nil
+	}
+	return client.Do(req)
 }
 
 // fillDefaultHeaders will add common headers to requests
