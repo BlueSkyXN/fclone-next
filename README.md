@@ -89,7 +89,7 @@ fclone and rclone-core versions. The upstream self-update command is not
 registered in any fclone build. Release builds set the fclone version explicitly:
 
 ```console
-make fclone FCLONE_VERSION=v0.1.0
+make fclone FCLONE_VERSION=v0.1.2
 ```
 
 To include the `cmount` implementation on a platform with the required FUSE

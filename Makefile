@@ -34,7 +34,7 @@ GO_VERSION := $(shell go version)
 GO_OS := $(shell go env GOOS)
 # fclone release metadata is kept separate from the embedded rclone core.
 # Release automation should override FCLONE_VERSION with the release tag.
-FCLONE_VERSION ?= v0.1.1-dev
+FCLONE_VERSION ?= v0.1.2-dev
 RCLONE_BASE_VERSION ?= $(shell sed -n 's/^var VersionTag = "\([^"]*\)"/\1/p' fs/versiontag.go)-DEV
 FCLONE_BINARY ?= fclone$(shell go env GOEXE)
 FCLONE_TAGS ?= noselfupdate

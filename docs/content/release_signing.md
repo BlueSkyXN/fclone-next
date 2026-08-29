@@ -5,7 +5,7 @@ description: "Archived upstream reference; it does not describe fclone releases.
 
 # Upstream rclone release signing
 
-> **This page does not apply to fclone releases.** fclone v0.1.0 publishes
+> **This page does not apply to fclone releases.** fclone publishes
 > unsigned SHA-256 checksum files with its GitHub Release assets. A checksum
 > can detect an accidental or post-download file change, but it does not
 > independently authenticate the publisher. Download both the archive and

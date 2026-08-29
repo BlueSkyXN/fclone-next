@@ -44,7 +44,7 @@ For example:
 
 ` + "```console" + `
 $ fclone version
-fclone v0.1.0
+fclone v0.1.2
 - rclone v1.75.0-DEV
 - os/version: ubuntu 18.04 (64 bit)
 - os/kernel: 4.15.0-136-generic (x86_64)
