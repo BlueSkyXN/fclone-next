@@ -2,8 +2,8 @@
 
 ## Scope
 
-fclone is based on the rclone v1.75.0 development line at upstream commit
-`bd4c6571e` and restores selected behavior from the
+fclone is based on the signed rclone v1.75.0 release at upstream commit
+`9ee9d0a0c` and restores selected behavior from the
 historical fclone/gclone family as a new implementation. The goal is practical
 configuration and command compatibility, not bug-for-bug reproduction of an
 old rclone release.

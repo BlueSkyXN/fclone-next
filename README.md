@@ -1,8 +1,8 @@
 # fclone
 
 fclone is a compatibility-focused derivative of
-[rclone](https://github.com/rclone/rclone), currently based on the rclone
-v1.75.0 development line at upstream commit `bd4c6571e`. It
+[rclone](https://github.com/rclone/rclone), currently based on the signed
+rclone v1.75.0 release at upstream commit `9ee9d0a0c`. It
 reimplements the useful behavior of the historical fclone/gclone family on a
 current rclone core while preserving normal rclone configuration and command
 semantics.
@@ -76,7 +76,7 @@ project's releases instead.
 
 ## Building fclone
 
-Go 1.25 or newer is required. Go 1.26.5 is recommended and is the toolchain
+Go 1.25 or newer is required. Go 1.26.6 is recommended and is the toolchain
 used for release builds.
 
 ```console
@@ -89,7 +89,7 @@ fclone and rclone-core versions. The upstream self-update command is not
 registered in any fclone build. Release builds set the fclone version explicitly:
 
 ```console
-make fclone FCLONE_VERSION=v0.1.0
+make fclone FCLONE_VERSION=v0.1.2
 ```
 
 To include the `cmount` implementation on a platform with the required FUSE
