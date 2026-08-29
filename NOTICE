@@ -1,8 +1,9 @@
 fclone
 ======
 
-This project is based on the upstream rclone source code. Exact embedded-core
-coordinates are recorded in each versioned release note.
+This source tree is based on the signed upstream rclone v1.75.0 release at
+commit 9ee9d0a0cafd5e5fe3b271d2280b090ab6e64048. Exact embedded-core coordinates
+for published artifacts are recorded in each versioned release note.
 
 rclone is Copyright (C) 2012-2026 The Rclone Authors and is distributed under
 the MIT License. The complete license text is included in COPYING. The upstream

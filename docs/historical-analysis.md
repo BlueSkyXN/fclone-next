@@ -14,8 +14,8 @@ Google Drive 后端、同步调度和统计输出上的补丁。它的主要能�
    `xfr#`/`chk#` 计数；
 6. 将产物和版本文案改名为 fclone。
 
-最初候选以 rclone v1.74.4 为基线；本次正式实现已迁移到 rclone v1.75.0
-开发线的上游提交 `bd4c6571e`。项目做行为级复刻，不追求旧实现的逐行移植或
+最初候选以 rclone v1.74.4 为基线；本次正式实现已迁移到已签名的
+rclone v1.75.0 正式版上游提交 `9ee9d0a0c`。项目做行为级复刻，不追求旧实现的逐行移植或
 bug-for-bug 兼容。配置名和常用命令语义尽量保留，并重新设计了并发、缓存、
 取消、权限保护和可测试性。
 
@@ -34,7 +34,7 @@ bug-for-bug 兼容。配置名和常用命令语义尽量保留，并重新设�
 | v0.4.1 标签指向 | [`07e5a6ed9869fb89602dbcd383f4d58a85024701`](https://github.com/mawaya/rclone/commit/07e5a6ed9869fb89602dbcd383f4d58a85024701) | 注解标签 [`fclone-v0.4.1`](https://github.com/mawaya/rclone/tree/fclone-v0.4.1) 解引用后指向此提交；也是最后一个功能修复 |
 | 历史分支最终 HEAD | [`88050fc0300a0974604dd7083fe9a33440a9450e`](https://github.com/mawaya/rclone/commit/88050fc0300a0974604dd7083fe9a33440a9450e) | 2020-09-22；相比 `07e5a6ed…` 只删除了 README 中的 3 行，运行时树不变 |
 | 初始候选基线 | [`rclone/rclone@5bc93a2a`](https://github.com/rclone/rclone/commit/5bc93a2a7ab0ebd0a11352bc4968eabeffb18027) | [rclone v1.74.4](https://github.com/rclone/rclone/releases/tag/v1.74.4)，2026-07-08 |
-| 当前实现基线 | [`rclone/rclone@bd4c6571`](https://github.com/rclone/rclone/commit/bd4c6571ecdb4851948f974333ba0f3bb8e4e6a2) | rclone v1.75.0 development line，2026-07-30 |
+| 当前实现基线 | [`rclone/rclone@9ee9d0a0`](https://github.com/rclone/rclone/commit/9ee9d0a0cafd5e5fe3b271d2280b090ab6e64048) | 已签名的 rclone v1.75.0 正式版，2026-07-31 |
 
 “最早起点”和“最终净差异基线”不是同一个概念。fclone 在 2020 年 6–9 月期间继续
 合入上游；因此要回答“最终 fclone 比同期 rclone 多了什么”，应比较
