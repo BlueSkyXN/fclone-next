@@ -28,7 +28,7 @@ jobs:
       matrix:
         go:
           - "1.25.x"
-          - "1.26.5"
+          - "1.26.6"
 
     steps:
       - name: Checkout
@@ -79,17 +79,17 @@ jobs:
             "$RUNNER_TEMP/mount2.test" -test.v
 
       - name: Vet all packages
-        if: matrix.go == '1.26.5'
+        if: matrix.go == '1.26.6'
         run: go vet ./...
 
       - name: Race-test compatibility packages
-        if: matrix.go == '1.26.5'
+        if: matrix.go == '1.26.6'
         env:
           RCLONE_CONFIG: /notfound
         run: go test -race ./backend/drive ./fs/cache ./fs/sync ./fs/accounting
 
       - name: Build and inspect fclone
-        if: matrix.go == '1.26.5'
+        if: matrix.go == '1.26.6'
         run: |
           make fclone FCLONE_VERSION=v0.1.1-ci
           core_version="$(sed -n 's/^var VersionTag = "\([^"]*\)"/\1/p' fs/versiontag.go)-DEV"
@@ -100,7 +100,7 @@ jobs:
           grep -F 'official rclone releases are disabled' version-check.txt
 
       - name: Verify default build cannot self-update
-        if: matrix.go == '1.26.5'
+        if: matrix.go == '1.26.6'
         run: |
           go build -o fclone-default .
           ./fclone-default version | grep -F 'fclone v0.1.1-dev'
@@ -124,7 +124,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.26.5"
+          go-version: "1.26.6"
           check-latest: true
           cache: true
 
@@ -188,7 +188,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.26.5"
+          go-version: "1.26.6"
           check-latest: true
           cache: true
 
@@ -232,7 +232,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.26.5"
+          go-version: "1.26.6"
           check-latest: true
           cache: true
 

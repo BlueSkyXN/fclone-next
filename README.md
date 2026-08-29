@@ -76,7 +76,7 @@ project's releases instead.
 
 ## Building fclone
 
-Go 1.25 or newer is required. Go 1.26.5 is recommended and is the toolchain
+Go 1.25 or newer is required. Go 1.26.6 is recommended and is the toolchain
 used for release builds.
 
 ```console
