@@ -19,7 +19,7 @@ type fcloneDirectoryPrecreator interface {
 // optimization: after checking, create missing non-empty destination
 // directories before any file transfer starts.
 func (s *syncCopyMove) fclonePrecreateDirectories(ctx context.Context) {
-	if !s.fclonePrecreateEnabled || ctx.Err() != nil {
+	if !s.fclonePrecreateEnabled || s.ci.Interactive || ctx.Err() != nil {
 		return
 	}
 	precreator, ok := s.fdst.(fcloneDirectoryPrecreator)

@@ -18,6 +18,16 @@ import (
 // drained all checker work.
 func (f *Fs) FclonePrecreateDirectories(ctx context.Context, directories []string, workers int) (int, error) {
 	levels := fcloneDirectoryLevels(directories)
+	if len(levels) == 1 && len(levels[0]) == 0 {
+		return 0, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	// Cache entries are relative to the true root until FindRoot succeeds.
+	if err := f.dirCache.FindRoot(ctx, true); err != nil {
+		return 0, err
+	}
 	if workers < 1 {
 		workers = 1
 	}

@@ -2,12 +2,21 @@ package drive
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rclone/rclone/fs"
 	fscache "github.com/rclone/rclone/fs/cache"
+	"github.com/rclone/rclone/fs/config/configmap"
+	"github.com/rclone/rclone/fs/filter"
+	"github.com/rclone/rclone/fs/rc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 )
 
 func TestParseFcloneRootSpec(t *testing.T) {
@@ -137,4 +146,115 @@ func TestFcloneDirectFileCacheIsolationAndError(t *testing.T) {
 	})
 	require.ErrorIs(t, err, fs.ErrorIsFile)
 	assert.Same(t, left, gotLeftAgain)
+}
+
+func fcloneTestConfig(t *testing.T, transport http.RoundTripper, values configmap.Simple) (context.Context, *configmap.Map) {
+	t.Helper()
+	credentials := filepath.Join(t.TempDir(), "credentials.json")
+	require.NoError(t, os.WriteFile(credentials, []byte(`{"type":"authorized_user","client_id":"test","client_secret":"test","refresh_token":"test","token_uri":"https://example.invalid/token"}`), 0o600))
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credentials)
+	client := &http.Client{Transport: fcloneRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() == "https://example.invalid/token" {
+			return fcloneJSONResponse(http.StatusOK, `{"access_token":"test","token_type":"Bearer","expires_in":3600}`), nil
+		}
+		return transport.RoundTrip(request)
+	})}
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
+	reg, err := fs.Find("drive")
+	require.NoError(t, err)
+	values["env_auth"] = "true"
+	values["skip_gdocs"] = "true"
+	values["pacer_min_sleep"] = "0"
+	return ctx, fs.ConfigMap(reg.Prefix, reg.Options, "fclone-test", values)
+}
+
+func TestFcloneDirectFolderFileCache(t *testing.T) {
+	for _, resourceKey := range []string{"", "key with spaces/+"} {
+		for _, parentFirst := range []bool{false, true} {
+			t.Run(fmt.Sprintf("resourceKey=%q/parentFirst=%v", resourceKey, parentFirst), func(t *testing.T) {
+				fscache.Clear()
+				t.Cleanup(fscache.Clear)
+				spec := fcloneRootSpec{id: "folder-id", resourceKey: resourceKey}
+				parentRoot := fcloneCanonicalRoot(spec)
+				fileRoot := parentRoot + "/file.txt"
+				ctx, mapper := fcloneTestConfig(t, fcloneRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
+					switch request.URL.Path {
+					case "/drive/v3/files/folder-id":
+						if resourceKey != "" {
+							assert.Equal(t, "folder-id/"+resourceKey, request.Header.Get("X-Goog-Drive-Resource-Keys"))
+						}
+						return fcloneJSONResponse(http.StatusOK, `{"id":"folder-id","name":"Folder","mimeType":"application/vnd.google-apps.folder"}`), nil
+					case "/drive/v3/files":
+						query := request.URL.Query().Get("q")
+						if strings.Contains(query, "mimeType='application/vnd.google-apps.folder'") {
+							return fcloneJSONResponse(http.StatusOK, `{"files":[]}`), nil
+						}
+						return fcloneJSONResponse(http.StatusOK, `{"files":[{"id":"file-id","name":"file.txt","mimeType":"text/plain","md5Checksum":"1234","size":"1"}]}`), nil
+					default:
+						return nil, fmt.Errorf("unexpected request: %s", request.URL)
+					}
+				}), configmap.Simple{})
+				var parent fs.Fs
+				if parentFirst {
+					var err error
+					parent, err = fscache.GetFn(ctx, "fclone-test:"+parentRoot, func(ctx context.Context, _ string) (fs.Fs, error) {
+						return NewFs(ctx, "fclone-test", parentRoot, mapper)
+					})
+					require.NoError(t, err)
+				}
+				fileInput := "fclone-test:" + fileRoot
+				f, err := fscache.GetFn(ctx, fileInput, func(ctx context.Context, _ string) (fs.Fs, error) {
+					return NewFs(ctx, "fclone-test", fileRoot, mapper)
+				})
+				require.ErrorIs(t, err, fs.ErrorIsFile)
+				assert.Equal(t, parentRoot, f.Root())
+				if parentFirst {
+					assert.Same(t, parent, f)
+				}
+				again, err := fscache.GetFn(ctx, fileInput, func(context.Context, string) (fs.Fs, error) {
+					t.Fatal("cached file unexpectedly recreated")
+					return nil, nil
+				})
+				require.ErrorIs(t, err, fs.ErrorIsFile)
+				assert.Same(t, f, again)
+				limitedCtx, _, err := rc.GetFsNamedFileOK(ctx, rc.Params{"fs": fileInput}, "fs")
+				require.NoError(t, err)
+				fi := filter.GetConfig(limitedCtx)
+				assert.True(t, fi.IncludeRemote("file.txt"))
+				assert.False(t, fi.IncludeRemote("private.txt"))
+			})
+		}
+	}
+}
+
+func TestFcloneDirectRootOverridesSharedDrive(t *testing.T) {
+	for _, driveID := range []string{"", "resolved-drive"} {
+		t.Run("driveID="+driveID, func(t *testing.T) {
+			ctx, mapper := fcloneTestConfig(t, fcloneRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
+				switch request.URL.Path {
+				case "/drive/v3/files/folder-id":
+					return fcloneJSONResponse(http.StatusOK, fmt.Sprintf(`{"id":"folder-id","name":"Folder","mimeType":"application/vnd.google-apps.folder","driveId":%q}`, driveID)), nil
+				case "/drive/v3/files":
+					assert.Equal(t, driveID, request.URL.Query().Get("driveId"))
+					if driveID == "" {
+						assert.Empty(t, request.URL.Query().Get("corpora"))
+					} else {
+						assert.Equal(t, "drive", request.URL.Query().Get("corpora"))
+					}
+					return fcloneJSONResponse(http.StatusOK, `{"files":[]}`), nil
+				case "/drive/v3/drives/" + driveID:
+					return fcloneJSONResponse(http.StatusOK, fmt.Sprintf(`{"id":%q}`, driveID)), nil
+				default:
+					return nil, fmt.Errorf("unexpected request: %s", request.URL)
+				}
+			}), configmap.Simple{"team_drive": "configured-drive"})
+			f, err := NewFs(ctx, "fclone-test", "{folder-id}", mapper)
+			require.NoError(t, err)
+			driveFs := f.(*Fs)
+			assert.Equal(t, driveID, driveFs.opt.TeamDriveID)
+			assert.Equal(t, driveID != "", driveFs.isTeamDrive)
+			_, err = f.List(ctx, "")
+			require.NoError(t, err)
+		})
+	}
 }

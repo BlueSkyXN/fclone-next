@@ -991,6 +991,10 @@ func (f *Fs) shouldRetryLeaseWithToken(ctx context.Context, err error, lease *fc
 	if !hasPageToken {
 		return f.shouldRetryLease(ctx, err, lease)
 	}
+	return f.shouldRetryWithoutRotation(ctx, err)
+}
+
+func (f *Fs) shouldRetryWithoutRotation(ctx context.Context, err error) (bool, error) {
 	return f.shouldRetryWithRotation(ctx, err, func(context.Context, string) (bool, error) {
 		return false, nil
 	})
@@ -1572,10 +1576,8 @@ func NewFs(ctx context.Context, name, path string, m configmap.Mapper) (fs.Fs, e
 		if err != nil {
 			return nil, fmt.Errorf("fclone: couldn't resolve Drive ID %q: %w", fcloneRoot.id, err)
 		}
-		if fcloneRootInfo.DriveId != "" {
-			f.opt.TeamDriveID = fcloneRootInfo.DriveId
-			f.isTeamDrive = true
-		}
+		f.opt.TeamDriveID = fcloneRootInfo.DriveId
+		f.isTeamDrive = fcloneRootInfo.DriveId != ""
 		if fcloneRootInfo.ResourceKey == "" {
 			fcloneRootInfo.ResourceKey = effectiveResourceKey
 		}
@@ -1686,6 +1688,11 @@ func NewFs(ctx context.Context, name, path string, m configmap.Mapper) (fs.Fs, e
 		// See https://github.com/rclone/rclone/issues/2182
 		f.dirCache = tempF.dirCache
 		f.root = tempF.root
+		if hasFcloneRoot {
+			fcloneRoot.path = f.root
+			fcloneRoot.resourceKey = effectiveResourceKey
+			f.fcloneConfigRoot = fcloneCanonicalRoot(fcloneRoot)
+		}
 		return f, fs.ErrorIsFile
 	}
 	// fmt.Printf("Root id %s", f.dirCache.RootID())

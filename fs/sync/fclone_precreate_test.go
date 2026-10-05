@@ -68,7 +68,7 @@ func TestFclonePrecreateDirectorySelection(t *testing.T) {
 	assert.Equal(t, 7, destination.workers)
 }
 
-func TestFclonePrecreateSkipsCancelledAndDryRun(t *testing.T) {
+func TestFclonePrecreateSkipsCancelledDryRunAndInteractive(t *testing.T) {
 	destination := &fclonePrecreateTestFs{}
 	s := &syncCopyMove{
 		fdst:                   destination,
@@ -80,6 +80,11 @@ func TestFclonePrecreateSkipsCancelledAndDryRun(t *testing.T) {
 	assert.Zero(t, destination.calls)
 
 	s.ci.DryRun = false
+	s.ci.Interactive = true
+	s.fclonePrecreateDirectories(context.Background())
+	assert.Zero(t, destination.calls, "interactive transfers must confirm before creating directories")
+
+	s.ci.Interactive = false
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	s.fclonePrecreateDirectories(ctx)
