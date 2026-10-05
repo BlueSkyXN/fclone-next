@@ -294,12 +294,14 @@ func (f *Fs) fcloneSharedDriveID(requireRoot bool) (string, error) {
 }
 
 func (f *Fs) fcloneCreateSharedDrive(ctx context.Context, lease *fcloneServiceLease, name string) (newDrive *gdrive.Drive, err error) {
+	requestID := uuid.NewString()
 	err = f.pacer.Call(func() (bool, error) {
-		newDrive, err = lease.service.Drives.Create(uuid.NewString(), &gdrive.Drive{Name: name}).
+		newDrive, err = lease.service.Drives.Create(requestID, &gdrive.Drive{Name: name}).
 			Fields("id,name,createdTime").
 			Context(ctx).
 			Do()
-		return f.shouldRetryLease(ctx, err, lease)
+		// Drive deduplicates request IDs only for the same authenticated user.
+		return f.shouldRetryWithoutRotation(ctx, err)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("couldn't create Shared Drive %q: %w", name, err)

@@ -76,6 +76,7 @@ type fcloneServiceAccountPool struct {
 	nextSource       int
 	primary          *fcloneServiceAccount
 	accounts         []*fcloneServiceAccount
+	quotaFailed      map[string]bool
 	nextServiceIndex int
 	nextRotate       int
 	nextEvict        int
@@ -248,7 +249,7 @@ func (p *fcloneServiceAccountPool) loadNextReplaceLocked(ctx context.Context, re
 				break
 			}
 		}
-		if alreadyLoaded {
+		if alreadyLoaded || replace && p.quotaFailed[account.key] {
 			continue
 		}
 		if account.transport == nil {
@@ -314,13 +315,30 @@ func (p *fcloneServiceAccountPool) context() context.Context {
 	return context.Background()
 }
 
-func (p *fcloneServiceAccountPool) hasOtherAccountLocked(currentKey string) bool {
-	for _, account := range p.accounts {
-		if account.key != currentKey {
-			return true
+func (p *fcloneServiceAccountPool) nextAccountLocked(ctx context.Context, currentKey string) (*fcloneServiceAccount, error) {
+	if p.quotaFailed == nil {
+		p.quotaFailed = make(map[string]bool)
+	}
+	p.quotaFailed[currentKey] = true
+	for pass := 0; pass < 2; pass++ {
+		for range p.accounts {
+			account := p.accounts[p.nextRotate%len(p.accounts)]
+			p.nextRotate++
+			if !p.quotaFailed[account.key] {
+				return account, nil
+			}
+		}
+		account, err := p.loadNextReplaceLocked(ctx, true)
+		if err != nil || account != nil {
+			return account, err
+		}
+		// Retry exhausted identities only after every credential has had a turn.
+		if pass == 0 {
+			clear(p.quotaFailed)
+			p.quotaFailed[currentKey] = true
 		}
 	}
-	return false
+	return nil, nil
 }
 
 func sameFcloneCredentialFile(left, right string) bool {
@@ -344,8 +362,14 @@ func (p *fcloneServiceAccountPool) newLease(ctx context.Context) (*fcloneService
 		p.mu.Unlock()
 		return nil, errors.New("fclone: Service Account pool has no clients")
 	}
-	account := p.accounts[p.nextServiceIndex%len(p.accounts)]
-	p.nextServiceIndex++
+	var account *fcloneServiceAccount
+	for range p.accounts {
+		account = p.accounts[p.nextServiceIndex%len(p.accounts)]
+		p.nextServiceIndex++
+		if !p.quotaFailed[account.key] {
+			break
+		}
+	}
 	client := p.clientTemplate
 	p.mu.Unlock()
 
@@ -376,28 +400,19 @@ func (lease *fcloneServiceLease) rotate(ctx context.Context, reason string) (boo
 	if !lease.lastRotate.IsZero() && now.Sub(lease.lastRotate) < p.minSleep {
 		return false, nil
 	}
-	if !p.hasOtherAccountLocked(lease.currentKey) {
-		if _, err := p.loadNextReplaceLocked(ctx, true); err != nil {
-			return false, err
-		}
+	account, err := p.nextAccountLocked(ctx, lease.currentKey)
+	if err != nil || account == nil {
+		return false, err
 	}
-	for range p.accounts {
-		account := p.accounts[p.nextRotate%len(p.accounts)]
-		p.nextRotate++
-		if account.key == lease.currentKey {
-			continue
-		}
-		lease.switcher.set(account.transport)
-		lease.currentKey = account.key
-		lease.lastRotate = now
-		label := account.file
-		if label == "" {
-			label = "<primary inline/environment credentials>"
-		}
-		fs.Infof(nil, "fclone: rotated operation Service Account to %q after %s", label, reason)
-		return true, nil
+	lease.switcher.set(account.transport)
+	lease.currentKey = account.key
+	lease.lastRotate = now
+	label := account.file
+	if label == "" {
+		label = "<primary inline/environment credentials>"
 	}
-	return false, nil
+	fs.Infof(nil, "fclone: rotated operation Service Account to %q after %s", label, reason)
+	return true, nil
 }
 
 // rotate switches the main Drive services to another account after a quota
@@ -414,33 +429,23 @@ func (p *fcloneServiceAccountPool) rotate(ctx context.Context, reason string) (b
 	if !p.lastRotate.IsZero() && now.Sub(p.lastRotate) < p.minSleep {
 		return false, nil
 	}
-	if !p.hasOtherAccountLocked(p.currentKey) {
-		if _, err := p.loadNextReplaceLocked(ctx, true); err != nil {
-			return false, err
-		}
-	}
-	if len(p.accounts) == 0 || p.switcher == nil {
+	if p.switcher == nil {
 		return false, nil
 	}
-
-	for range p.accounts {
-		account := p.accounts[p.nextRotate%len(p.accounts)]
-		p.nextRotate++
-		if account.key == p.currentKey {
-			continue
-		}
-		p.switcher.set(account.transport)
-		p.currentKey = account.key
-		p.currentFile = account.file
-		p.lastRotate = now
-		label := account.file
-		if label == "" {
-			label = "<primary inline/environment credentials>"
-		}
-		fs.Infof(nil, "fclone: rotated Service Account to %q after %s", label, reason)
-		return true, nil
+	account, err := p.nextAccountLocked(ctx, p.currentKey)
+	if err != nil || account == nil {
+		return false, err
 	}
-	return false, nil
+	p.switcher.set(account.transport)
+	p.currentKey = account.key
+	p.currentFile = account.file
+	p.lastRotate = now
+	label := account.file
+	if label == "" {
+		label = "<primary inline/environment credentials>"
+	}
+	fs.Infof(nil, "fclone: rotated Service Account to %q after %s", label, reason)
+	return true, nil
 }
 
 func (p *fcloneServiceAccountPool) activeFile() string {
@@ -469,6 +474,7 @@ func (p *fcloneServiceAccountPool) activateFile(ctx context.Context, file string
 		return err
 	}
 	key := fcloneCredentialKey(file, false)
+	delete(p.quotaFailed, key)
 	newPrimary := &fcloneServiceAccount{key: key, file: file, transport: client.Transport}
 	p.primary = newPrimary
 	preferred := -1

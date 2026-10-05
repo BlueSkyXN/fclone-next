@@ -3,6 +3,7 @@ package drive
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/lib/pacer"
 	"github.com/stretchr/testify/assert"
@@ -139,6 +141,37 @@ func TestFcloneServiceAccountPoolRoundRobin(t *testing.T) {
 	assert.Equal(t, "first", firstLease.currentKey)
 	assert.Equal(t, "second", secondLease.currentKey)
 	assert.Equal(t, "first", thirdLease.currentKey)
+}
+
+func TestFcloneServiceAccountPoolSkipsQuotaFailedAccounts(t *testing.T) {
+	first := &fcloneNamedTransport{name: "first"}
+	second := &fcloneNamedTransport{name: "second"}
+	pool := &fcloneServiceAccountPool{
+		accounts: []*fcloneServiceAccount{
+			{key: "first", transport: first},
+			{key: "second", transport: second},
+		},
+		max: 2,
+	}
+	ctx := context.Background()
+	lease, err := pool.newLease(ctx)
+	require.NoError(t, err)
+	rotated, err := lease.rotate(ctx, "userRateLimitExceeded")
+	require.NoError(t, err)
+	require.True(t, rotated)
+	for range 4 {
+		lease, err = pool.newLease(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, "second", lease.currentKey, "new transfers must prefer accounts without a quota failure")
+	}
+
+	rotated, err = lease.rotate(ctx, "userRateLimitExceeded")
+	require.NoError(t, err)
+	require.True(t, rotated)
+	assert.Equal(t, "first", lease.currentKey, "accounts remain usable on the next rotation cycle")
+	lease, err = pool.newLease(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "first", lease.currentKey)
 }
 
 func TestFcloneServiceLeaseKeepsItsTransport(t *testing.T) {
@@ -446,6 +479,56 @@ func TestFcloneResumableUploadRotationRequestsHighLevelRetry(t *testing.T) {
 	assert.True(t, fserrors.IsRetryError(err), "rotating an established session must restart the whole file")
 	assert.ErrorContains(t, err, "restart session")
 	assert.Equal(t, "second", lease.currentKey)
+}
+
+func TestFcloneServiceAccountRotationReachesAllCredentials(t *testing.T) {
+	for _, scope := range []string{"main", "lease"} {
+		for _, max := range []int{1, 2, 4} {
+			for _, preload := range []int{1, 2} {
+				t.Run(fmt.Sprintf("%s/max=%d/preload=%d", scope, max, preload), func(t *testing.T) {
+					ctx := context.Background()
+					directory := t.TempDir()
+					var keys []string
+					for _, name := range []string{"a", "b", "c", "d"} {
+						file := filepath.Join(directory, name+".json")
+						credentials := fmt.Sprintf(`{"type":"service_account","client_email":"%s@example.invalid","private_key":"unused","token_uri":"https://example.invalid/token"}`, name)
+						require.NoError(t, os.WriteFile(file, []byte(credentials), 0o600))
+						keys = append(keys, fcloneCredentialKey(file, false))
+					}
+					opt := &Options{ServiceAccountFilePath: directory, ServicesPreload: preload, ServicesMax: max}
+					pool, err := prepareFcloneServiceAccountPool(opt)
+					require.NoError(t, err)
+					_, err = pool.attach(ctx, &http.Client{Transport: &fcloneNamedTransport{name: "a"}}, opt, "drive", configmap.Simple{})
+					require.NoError(t, err)
+					lease, err := pool.newLease(ctx)
+					require.NoError(t, err)
+					currentKey := pool.currentKey
+					for range 2 {
+						seen := map[string]bool{currentKey: true}
+						for range 2 * len(keys) {
+							previousKey := currentKey
+							var rotated bool
+							if scope == "main" {
+								rotated, err = pool.rotate(ctx, "userRateLimitExceeded")
+								currentKey = pool.currentKey
+							} else {
+								rotated, err = lease.rotate(ctx, "userRateLimitExceeded")
+								currentKey = lease.currentKey
+							}
+							require.NoError(t, err)
+							require.True(t, rotated)
+							assert.NotEqual(t, previousKey, currentKey)
+							assert.LessOrEqual(t, len(pool.accounts), max)
+							seen[currentKey] = true
+						}
+						for _, key := range keys {
+							assert.Contains(t, seen, key, "every credential must remain reachable after cache eviction")
+						}
+					}
+				})
+			}
+		}
+	}
 }
 
 func TestFcloneStopOnUploadLimitTakesPriorityOverRotation(t *testing.T) {

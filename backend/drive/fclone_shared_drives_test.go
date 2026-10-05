@@ -2,12 +2,17 @@ package drive
 
 import (
 	"context"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/lib/pacer"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	gdrive "google.golang.org/api/drive/v3"
+	"google.golang.org/api/option"
 )
 
 func TestFcloneAddDriveHonorsDryRun(t *testing.T) {
@@ -22,6 +27,70 @@ func TestFcloneAddDriveHonorsDryRun(t *testing.T) {
 	if !ok || result["dry_run"] != true || result["name"] != "Dry Run Drive" {
 		t.Fatalf("unexpected dry-run result: %#v", out)
 	}
+}
+
+func TestFcloneCreateSharedDriveReusesRequestID(t *testing.T) {
+	ctx := context.Background()
+	var requestIDs []string
+	client := &http.Client{Transport: fcloneRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		requestIDs = append(requestIDs, request.URL.Query().Get("requestId"))
+		if len(requestIDs)%2 == 1 {
+			return fcloneJSONResponse(http.StatusServiceUnavailable, `{"error":{"code":503,"message":"retry"}}`), nil
+		}
+		return fcloneJSONResponse(http.StatusOK, `{"id":"new-drive","name":"Test"}`), nil
+	})}
+	service, err := gdrive.NewService(ctx, option.WithHTTPClient(client))
+	require.NoError(t, err)
+	f := &Fs{pacer: fs.NewPacer(ctx, pacer.NewGoogleDrive(pacer.MinSleep(0), pacer.Burst(100)))}
+	lease := &fcloneServiceLease{service: service, client: client}
+	for range 2 {
+		_, err = f.fcloneCreateSharedDrive(ctx, lease, "Test")
+		require.NoError(t, err)
+	}
+	require.Len(t, requestIDs, 4)
+	assert.NotEmpty(t, requestIDs[0])
+	assert.Equal(t, requestIDs[0], requestIDs[1])
+	assert.Equal(t, requestIDs[2], requestIDs[3])
+	assert.NotEqual(t, requestIDs[0], requestIDs[2], "independent creations must use different request IDs")
+}
+
+func TestFcloneCreateSharedDriveKeepsIdentity(t *testing.T) {
+	ctx := context.Background()
+	var primaryRequestIDs []string
+	secondaryRequests := 0
+	primary := fcloneRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		primaryRequestIDs = append(primaryRequestIDs, request.URL.Query().Get("requestId"))
+		switch len(primaryRequestIDs) {
+		case 1:
+			return fcloneJSONResponse(http.StatusServiceUnavailable, `{"error":{"code":503,"message":"retry"}}`), nil
+		case 2:
+			return fcloneJSONResponse(http.StatusForbidden, `{"error":{"code":403,"message":"quota","errors":[{"reason":"userRateLimitExceeded","message":"quota"}]}}`), nil
+		default:
+			return fcloneJSONResponse(http.StatusConflict, `{"error":{"code":409,"message":"already created"}}`), nil
+		}
+	})
+	secondary := fcloneRoundTripperFunc(func(*http.Request) (*http.Response, error) {
+		secondaryRequests++
+		return fcloneJSONResponse(http.StatusOK, `{"id":"duplicate-drive","name":"Test"}`), nil
+	})
+	pool := &fcloneServiceAccountPool{
+		accounts: []*fcloneServiceAccount{
+			{key: "primary", transport: primary},
+			{key: "secondary", transport: secondary},
+		},
+		max: 2,
+	}
+	lease, err := pool.newLease(ctx)
+	require.NoError(t, err)
+	f := &Fs{pacer: fs.NewPacer(ctx, pacer.NewGoogleDrive(pacer.MinSleep(0), pacer.Burst(100)))}
+	_, err = f.fcloneCreateSharedDrive(ctx, lease, "Test")
+	assert.ErrorContains(t, err, "already created")
+	assert.Zero(t, secondaryRequests, "Drive request IDs only deduplicate requests by the same user")
+	assert.Equal(t, "primary", lease.currentKey)
+	require.Len(t, primaryRequestIDs, 3)
+	assert.NotEmpty(t, primaryRequestIDs[0])
+	assert.Equal(t, primaryRequestIDs[0], primaryRequestIDs[1])
+	assert.Equal(t, primaryRequestIDs[0], primaryRequestIDs[2])
 }
 
 func TestFormatFcloneSharedDrives(t *testing.T) {

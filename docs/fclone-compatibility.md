@@ -58,11 +58,13 @@ services_max = 100
 - If no explicit `service_account_file`, credential JSON, or environment
   authentication is configured, the first discovered JSON file becomes the
   initial account.
-- High-volume Drive metadata and upload operations lease preloaded accounts in
-  round-robin order. Before a paginated operation receives its first page
-  token, a quota error may switch the lease. After a token is issued, retries
-  stay on the same identity because Google does not guarantee that page tokens
-  are portable between accounts.
+- High-volume Drive metadata and upload operations lease cached accounts in
+  round-robin order, preferring accounts without a quota failure in the current
+  rotation cycle. Once the cached accounts are exhausted, rotation loads unused
+  credentials before retrying exhausted identities. Before a paginated operation
+  receives its first page token, a quota error may switch the lease. After a
+  token is issued, retries stay on the same identity because Google does not
+  guarantee that page tokens are portable between accounts.
 - Small uploads use one lease for the request. A resumable upload also keeps
   one identity for its session; if a quota response causes rotation between
   chunks, fclone abandons that session and asks the high-level transfer loop to
@@ -155,6 +157,11 @@ are copied. The authenticated principal must be allowed to create Shared
 Drives and manage permissions. `--dry-run` validates options and performs no
 creation or permission changes.
 
+Retries of one creation keep both the request ID and the authenticated identity
+unchanged, because Google's duplicate-creation protection is scoped to that
+identity. A conflict response after an uncertain result is reported as an error;
+check the Drive list before starting another creation command.
+
 ### Delete a Shared Drive
 
 Select the Shared Drive as the remote root, then invoke the command:
@@ -184,10 +191,13 @@ This does not make empty source directories appear at the destination; use
 applies: `--check-first` can use substantially more memory because the full
 transfer backlog is retained.
 
-Precreation runs parent-first and creates siblings concurrently. It is
-best-effort: a precreation error is logged, then normal lazy directory creation
-during transfer gets the final say. A cancelled check context skips the phase
+Precreation resolves the destination root before creating children, runs
+parent-first, and creates siblings concurrently. It is best-effort: a
+precreation error is logged, then normal lazy directory creation during
+transfer gets the final say. A cancelled check context skips the phase
 entirely so a graceful max-duration stop cannot create directories by itself.
+With `--interactive`, precreation is skipped so directory creation remains part
+of the normal confirmed transfer.
 
 ## Transfer statistics
 
